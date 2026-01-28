@@ -89,10 +89,18 @@ class ReportGenerator:
         """
         formats = formats or self.get_available_formats()
 
-        # Validate formats
-        invalid_formats = [f for f in formats if f not in self.reporters]
-        if invalid_formats:
-            raise ValueError(f"Unsupported formats: {invalid_formats}")
+        # Filter to only available formats (with warning for unavailable)
+        available_formats = []
+        for f in formats:
+            if f in self.reporters:
+                available_formats.append(f)
+            else:
+                print(f"Warning: {f.upper()} format not available (missing dependency). Skipping.")
+
+        if not available_formats:
+            raise ValueError(f"No requested formats are available. Available formats: {list(self.reporters.keys())}")
+
+        formats = available_formats
 
         # Generate AI insights if enabled
         ai_insights = None
