@@ -1,0 +1,115 @@
+# Production Readiness Checker - Default Configuration
+# This file contains default settings for PRC scans
+
+# Scanner Configuration
+scanners:
+  # Enable/disable specific scanners
+  trivy:
+    enabled: true
+    scan_vulnerabilities: true
+    scan_misconfigurations: true
+    scan_secrets: true
+    severity_threshold: "LOW"
+    ignore_unfixed: false
+
+  checkov:
+    enabled: true
+    soft_fail: true
+    frameworks: []  # Empty = all frameworks
+
+  gitleaks:
+    enabled: true
+    redact: true
+
+# Scoring Configuration
+scoring:
+  # Category weights (must sum to 1.0)
+  weights:
+    security: 0.35
+    performance: 0.25
+    reliability: 0.25
+    monitoring: 0.15
+
+  # Readiness threshold (0-100)
+  readiness_threshold: 70.0
+
+  # Blocking conditions
+  block_on_critical: true
+  block_on_high: false
+  max_critical_allowed: 0
+  max_high_allowed: 3
+
+  # Severity penalties (points deducted per issue)
+  severity_penalties:
+    critical: 25
+    high: 15
+    medium: 8
+    low: 3
+    info: 1
+
+# Reporting Configuration
+reporting:
+  # Default output formats
+  formats:
+    - json
+    - html
+
+  # Include AI insights in reports
+  enable_ai_insights: true
+
+  # Output directory (relative to project root)
+  output_dir: "prc_reports"
+
+# AI Configuration
+ai:
+  # OpenAI model to use
+  model: "gpt-4o-mini"
+  max_tokens: 2000
+  temperature: 0.3
+
+# File Discovery Configuration
+discovery:
+  # Maximum file size to process (bytes)
+  max_file_size: 10485760  # 10MB
+
+  # Directories to exclude
+  exclude_dirs:
+    - .git
+    - node_modules
+    - vendor
+    - .venv
+    - __pycache__
+    - dist
+    - build
+
+  # File extensions to exclude
+  exclude_extensions:
+    - .pyc
+    - .class
+    - .exe
+    - .dll
+    - .zip
+    - .tar
+    - .gz
+
+# Automated Fixes Configuration
+fixes:
+  # Backup directory for modified files
+  backup_dir: ".prc_backups"
+
+  # Minimum confidence for auto-apply
+  auto_apply_confidence: 0.9
+
+  # Skip fixes that require manual review
+  skip_review_required: true
+
+# CI/CD Integration
+ci:
+  # Exit with non-zero code if not production ready
+  fail_on_not_ready: true
+
+  # Add annotations for GitHub Actions
+  github_annotations: true
+
+  # Upload artifacts
+  upload_reports: true
