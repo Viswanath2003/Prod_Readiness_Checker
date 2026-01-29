@@ -201,13 +201,13 @@ class BuiltinSecretScanner(BaseScanner):
                 if any(excluded in item.parts for excluded in self.EXCLUDED_DIRS):
                     continue
 
-                # Check if file should be scanned
+                # Only scan HIGH_PRIORITY_FILES by default (secrets.yaml, .env, etc.)
+                # This prevents false positives from general config files
                 if self.scan_all_files:
                     yield item
                 elif item.name.lower() in self.HIGH_PRIORITY_FILES:
                     yield item
-                elif item.suffix.lower() in self.SCANNABLE_EXTENSIONS:
-                    yield item
+                # Skip SCANNABLE_EXTENSIONS - too aggressive, causes false positives
 
     def _scan_file(self, file_path: Path) -> List[Issue]:
         """Scan a single file for secrets.

@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 import hashlib
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Set, Tuple
@@ -11,7 +12,7 @@ from typing import List, Optional, Dict, Set, Tuple
 import click
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn, TaskProgressColumn
 from rich.table import Table
 from rich.text import Text
 from rich import print as rprint
@@ -296,27 +297,36 @@ def scan(
 
         return score, report_paths, scan_results, skipped_scanners
 
+    # Track timing
+    scan_start_time = time.time()
+
+    # File discovery phase
+    console.print("[cyan]Phase 1/3:[/cyan] Discovering files...")
+    discovery = FileDiscovery()
+    discovered = discovery.discover(target_path)
+    console.print(f"  Found [green]{discovered.total_files}[/green] files to analyze")
+
+    # Run the full scan with progress
+    console.print("[cyan]Phase 2/3:[/cyan] Running security scans...")
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
         console=console,
+        transient=False,
     ) as progress:
-        # File discovery
-        task = progress.add_task("[cyan]Discovering files...", total=None)
-        discovery = FileDiscovery()
-        discovered = discovery.discover(target_path)
-        progress.update(task, completed=True)
-        console.print(f"  Found [green]{discovered.total_files}[/green] files to analyze")
-
-        progress.update(task, completed=True)
-
-        # Run the full scan
-        task = progress.add_task("[cyan]Running security scans...", total=None)
+        # Create task for overall scan progress
+        scan_task = progress.add_task("[cyan]Scanning...", total=100)
 
         # Use asyncio.run() which handles cleanup properly
         try:
+            # Update progress as we go
+            progress.update(scan_task, completed=10, description="[cyan]Initializing scanners...")
             result = asyncio.run(run_full_scan())
+            progress.update(scan_task, completed=90, description="[cyan]Processing results...")
         except Exception as e:
             console.print(f"[red]Error during scan: {e}[/red]")
             sys.exit(1)
@@ -326,17 +336,26 @@ def scan(
             sys.exit(1)
 
         score, report_paths, scan_results, skipped_scanners = result
+        progress.update(scan_task, completed=100, description="[green]Scan complete!")
 
-        progress.update(task, completed=True)
+    # Calculate elapsed time
+    elapsed_time = time.time() - scan_start_time
+    minutes, seconds = divmod(int(elapsed_time), 60)
 
-        # Show active scanners
-        active_names = list(set(r.scanner_name for r in scan_results)) if scan_results else []
-        console.print(f"  Active scanners: [green]{', '.join(active_names) if active_names else 'None'}[/green]")
+    # Show active scanners
+    active_names = list(set(r.scanner_name for r in scan_results)) if scan_results else []
+    console.print(f"  Active scanners: [green]{', '.join(active_names) if active_names else 'None'}[/green]")
 
-        # Show skipped scanners
-        if skipped_scanners:
-            skipped_info = ", ".join([f"{name} ({reason})" for name, reason in skipped_scanners])
-            console.print(f"  Skipped scanners: [yellow]{skipped_info}[/yellow]")
+    # Show skipped scanners
+    if skipped_scanners:
+        skipped_info = ", ".join([f"{name} ({reason})" for name, reason in skipped_scanners])
+        console.print(f"  Skipped scanners: [yellow]{skipped_info}[/yellow]")
+
+    # Show timing
+    console.print(f"  [cyan]Total scan time:[/cyan] {minutes}m {seconds}s")
+
+    # Phase 3: Report generation
+    console.print("[cyan]Phase 3/3:[/cyan] Reports generated")
 
     # Display results
     console.print()
