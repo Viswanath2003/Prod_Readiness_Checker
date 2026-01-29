@@ -122,7 +122,74 @@ def scan(
     )
     project = storage.create_project(project)
 
-    # Run the scan
+    # Run the scan using a single event loop to avoid asyncio issues
+    async def run_full_scan():
+        """Run the complete scan workflow in a single async context."""
+        nonlocal output_dir
+
+        # Initialize scanners
+        active_scanners = []
+        external_available = False
+
+        scanner_list = list(scanners)
+        if "all" in scanner_list:
+            # Always include builtin scanner with external tools
+            scanner_list = ["trivy", "checkov", "gitleaks", "builtin"]
+
+        for scanner_name in scanner_list:
+            if scanner_name == "trivy":
+                scanner = TrivyScanner()
+                if scanner.is_available():
+                    active_scanners.append(scanner)
+                    external_available = True
+            elif scanner_name == "checkov":
+                scanner = CheckovScanner()
+                if scanner.is_available():
+                    active_scanners.append(scanner)
+                    external_available = True
+            elif scanner_name == "gitleaks":
+                scanner = GitleaksScanner()
+                if scanner.is_available():
+                    active_scanners.append(scanner)
+                    external_available = True
+            elif scanner_name == "builtin":
+                # Built-in scanner is always available and always runs
+                active_scanners.append(BuiltinSecretScanner())
+
+        # Ensure built-in scanner is included if no external tools and not already added
+        if not external_available and not any(isinstance(s, BuiltinSecretScanner) for s in active_scanners):
+            active_scanners.append(BuiltinSecretScanner())
+
+        if not active_scanners:
+            return None, None, []
+
+        # Run scans
+        executor = ParallelExecutor()
+        executor.add_scanners(active_scanners)
+        execution_result = await executor.execute(str(target_path))
+        scan_results = execution_result.scan_results
+
+        # Calculate score
+        scorer = Scorer(readiness_threshold=threshold)
+        score = scorer.calculate_score(scan_results)
+
+        # Generate reports
+        generator = ReportGenerator(
+            output_dir=output_dir,
+            enable_ai_insights=ai,
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+        )
+        report_paths = await generator.generate_reports(
+            project_name=project_name,
+            project_path=str(target_path),
+            scan_results=scan_results,
+            score=score,
+            formats=list(formats),
+            include_ai=ai,
+        )
+
+        return score, report_paths, scan_results, active_scanners
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -136,11 +203,10 @@ def scan(
         progress.update(task, completed=True)
         console.print(f"  Found [green]{discovered.total_files}[/green] files to analyze")
 
-        # Initialize scanners
+        # Initialize and run scan
         task = progress.add_task("[cyan]Initializing scanners...", total=None)
-        active_scanners = []
-        external_available = False
 
+        # Show scanner initialization info
         scanner_list = list(scanners)
         if "all" in scanner_list:
             scanner_list = ["trivy", "checkov", "gitleaks", "builtin"]
@@ -148,81 +214,46 @@ def scan(
         for scanner_name in scanner_list:
             if scanner_name == "trivy":
                 scanner = TrivyScanner()
-                if scanner.is_available():
-                    active_scanners.append(scanner)
-                    external_available = True
-                else:
+                if not scanner.is_available():
                     console.print(f"  [yellow]Warning: Trivy not available[/yellow]")
             elif scanner_name == "checkov":
                 scanner = CheckovScanner()
-                if scanner.is_available():
-                    active_scanners.append(scanner)
-                    external_available = True
-                else:
+                if not scanner.is_available():
                     console.print(f"  [yellow]Warning: Checkov not available[/yellow]")
             elif scanner_name == "gitleaks":
                 scanner = GitleaksScanner()
-                if scanner.is_available():
-                    active_scanners.append(scanner)
-                    external_available = True
-                else:
+                if not scanner.is_available():
                     console.print(f"  [yellow]Warning: Gitleaks not available[/yellow]")
-            elif scanner_name == "builtin":
-                # Built-in scanner is always available
-                active_scanners.append(BuiltinSecretScanner())
-
-        # Always add built-in scanner if no external scanners are available
-        if not external_available and not any(isinstance(s, BuiltinSecretScanner) for s in active_scanners):
-            console.print(f"  [cyan]Using built-in secret scanner (no external tools found)[/cyan]")
-            active_scanners.append(BuiltinSecretScanner())
 
         progress.update(task, completed=True)
 
-        if not active_scanners:
+        # Run the full scan in a single event loop
+        task = progress.add_task("[cyan]Running security scans...", total=None)
+
+        # Use asyncio.run with proper cleanup
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(run_full_scan())
+        finally:
+            # Proper cleanup of pending tasks and transports
+            pending = asyncio.all_tasks(loop)
+            for pending_task in pending:
+                pending_task.cancel()
+            # Give cancelled tasks a chance to complete
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+
+        if result[0] is None:
             console.print("[red]Error: No scanners available.[/red]")
             sys.exit(1)
 
+        score, report_paths, scan_results, active_scanners = result
+
+        progress.update(task, completed=True)
         console.print(f"  Active scanners: [green]{', '.join(s.name for s in active_scanners)}[/green]")
-
-        # Run scans
-        task = progress.add_task("[cyan]Running security scans...", total=len(active_scanners))
-        scan_results: List[ScanResult] = []
-
-        async def run_scans():
-            executor = ParallelExecutor()
-            executor.add_scanners(active_scanners)
-            return await executor.execute(str(target_path))
-
-        execution_result = asyncio.run(run_scans())
-        scan_results = execution_result.scan_results
-        progress.update(task, advance=len(active_scanners))
-
-        # Calculate score
-        task = progress.add_task("[cyan]Calculating scores...", total=None)
-        scorer = Scorer(readiness_threshold=threshold)
-        score = scorer.calculate_score(scan_results)
-        progress.update(task, completed=True)
-
-        # Generate reports
-        task = progress.add_task("[cyan]Generating reports...", total=None)
-
-        async def generate_reports():
-            generator = ReportGenerator(
-                output_dir=output_dir,
-                enable_ai_insights=ai,
-                openai_api_key=os.getenv("OPENAI_API_KEY"),
-            )
-            return await generator.generate_reports(
-                project_name=project_name,
-                project_path=str(target_path),
-                scan_results=scan_results,
-                score=score,
-                formats=list(formats),
-                include_ai=ai,
-            )
-
-        report_paths = asyncio.run(generate_reports())
-        progress.update(task, completed=True)
 
     # Display results
     console.print()

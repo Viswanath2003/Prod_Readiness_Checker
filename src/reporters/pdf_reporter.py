@@ -5,38 +5,59 @@ from typing import Optional, List, Tuple
 
 from .base_reporter import BaseReporter, ReportData
 
+# Attempt to import ReportLab
+REPORTLAB_AVAILABLE = False
+colors = None
+letter = A4 = None
+getSampleStyleSheet = ParagraphStyle = None
+inch = None
+SimpleDocTemplate = Paragraph = Spacer = Table = TableStyle = None
+PageBreak = Image = HRFlowable = None
+TA_CENTER = TA_LEFT = TA_RIGHT = None
+
 try:
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import letter, A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
+    from reportlab.lib import colors as _colors
+    from reportlab.lib.pagesizes import letter as _letter, A4 as _A4
+    from reportlab.lib.styles import getSampleStyleSheet as _getSampleStyleSheet, ParagraphStyle as _ParagraphStyle
+    from reportlab.lib.units import inch as _inch
     from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-        PageBreak, Image, HRFlowable
+        SimpleDocTemplate as _SimpleDocTemplate,
+        Paragraph as _Paragraph,
+        Spacer as _Spacer,
+        Table as _Table,
+        TableStyle as _TableStyle,
+        PageBreak as _PageBreak,
+        Image as _Image,
+        HRFlowable as _HRFlowable
     )
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    from reportlab.lib.enums import TA_CENTER as _TA_CENTER, TA_LEFT as _TA_LEFT, TA_RIGHT as _TA_RIGHT
+
+    # Assign to module-level variables
+    colors = _colors
+    letter = _letter
+    A4 = _A4
+    getSampleStyleSheet = _getSampleStyleSheet
+    ParagraphStyle = _ParagraphStyle
+    inch = _inch
+    SimpleDocTemplate = _SimpleDocTemplate
+    Paragraph = _Paragraph
+    Spacer = _Spacer
+    Table = _Table
+    TableStyle = _TableStyle
+    PageBreak = _PageBreak
+    Image = _Image
+    HRFlowable = _HRFlowable
+    TA_CENTER = _TA_CENTER
+    TA_LEFT = _TA_LEFT
+    TA_RIGHT = _TA_RIGHT
+
     REPORTLAB_AVAILABLE = True
 except ImportError:
-    REPORTLAB_AVAILABLE = False
+    pass
 
 
 class PDFReporter(BaseReporter):
     """Generate reports in PDF format using ReportLab."""
-
-    # Color definitions
-    COLORS = {
-        "primary": colors.HexColor("#2563eb"),
-        "success": colors.HexColor("#16a34a"),
-        "warning": colors.HexColor("#f59e0b"),
-        "danger": colors.HexColor("#dc2626"),
-        "critical": colors.HexColor("#7c2d12"),
-        "high": colors.HexColor("#dc2626"),
-        "medium": colors.HexColor("#f59e0b"),
-        "low": colors.HexColor("#2563eb"),
-        "info": colors.HexColor("#6b7280"),
-        "light_gray": colors.HexColor("#f1f5f9"),
-        "dark_gray": colors.HexColor("#1e293b"),
-    }
 
     def __init__(
         self,
@@ -51,15 +72,34 @@ class PDFReporter(BaseReporter):
             page_size: Page size ('letter' or 'a4')
             include_ai_insights: Include AI insights section
         """
-        super().__init__(output_dir)
-        self.page_size = letter if page_size.lower() == "letter" else A4
-        self.include_ai_insights = include_ai_insights
-
         if not REPORTLAB_AVAILABLE:
             raise ImportError(
                 "ReportLab is required for PDF generation. "
                 "Install it with: pip install reportlab"
             )
+
+        super().__init__(output_dir)
+        self.page_size = letter if page_size.lower() == "letter" else A4
+        self.include_ai_insights = include_ai_insights
+
+        # Initialize colors after confirming ReportLab is available
+        self._init_colors()
+
+    def _init_colors(self):
+        """Initialize color definitions."""
+        self.COLORS = {
+            "primary": colors.HexColor("#2563eb"),
+            "success": colors.HexColor("#16a34a"),
+            "warning": colors.HexColor("#f59e0b"),
+            "danger": colors.HexColor("#dc2626"),
+            "critical": colors.HexColor("#7c2d12"),
+            "high": colors.HexColor("#dc2626"),
+            "medium": colors.HexColor("#f59e0b"),
+            "low": colors.HexColor("#2563eb"),
+            "info": colors.HexColor("#6b7280"),
+            "light_gray": colors.HexColor("#f1f5f9"),
+            "dark_gray": colors.HexColor("#1e293b"),
+        }
 
     @property
     def format(self) -> str:

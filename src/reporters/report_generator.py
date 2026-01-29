@@ -52,8 +52,10 @@ class ReportGenerator:
         # Try to add PDF reporter
         try:
             self.reporters["pdf"] = PDFReporter(str(self.output_dir))
-        except ImportError:
-            pass  # PDF not available
+        except ImportError as e:
+            print(f"PDF reporter not available: {e}")
+        except Exception as e:
+            print(f"Error initializing PDF reporter: {e}")
 
     def get_available_formats(self) -> List[str]:
         """Get list of available report formats.
@@ -126,7 +128,9 @@ class ReportGenerator:
                 path = reporter.save(report_data)
                 report_paths[format_name] = path
             except Exception as e:
+                import traceback
                 print(f"Error generating {format_name} report: {e}")
+                print(f"  Details: {traceback.format_exc()}")
 
         return report_paths
 
