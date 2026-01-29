@@ -52,8 +52,10 @@ class ReportGenerator:
         # Try to add PDF reporter
         try:
             self.reporters["pdf"] = PDFReporter(str(self.output_dir))
-        except ImportError:
-            pass  # PDF not available
+        except ImportError as e:
+            print(f"PDF reporter not available: {e}")
+        except Exception as e:
+            print(f"Error initializing PDF reporter: {e}")
 
     def get_available_formats(self) -> List[str]:
         """Get list of available report formats.
@@ -89,10 +91,18 @@ class ReportGenerator:
         """
         formats = formats or self.get_available_formats()
 
-        # Validate formats
-        invalid_formats = [f for f in formats if f not in self.reporters]
-        if invalid_formats:
-            raise ValueError(f"Unsupported formats: {invalid_formats}")
+        # Filter to only available formats (with warning for unavailable)
+        available_formats = []
+        for f in formats:
+            if f in self.reporters:
+                available_formats.append(f)
+            else:
+                print(f"Warning: {f.upper()} format not available (missing dependency). Skipping.")
+
+        if not available_formats:
+            raise ValueError(f"No requested formats are available. Available formats: {list(self.reporters.keys())}")
+
+        formats = available_formats
 
         # Generate AI insights if enabled
         ai_insights = None
@@ -118,7 +128,9 @@ class ReportGenerator:
                 path = reporter.save(report_data)
                 report_paths[format_name] = path
             except Exception as e:
+                import traceback
                 print(f"Error generating {format_name} report: {e}")
+                print(f"  Details: {traceback.format_exc()}")
 
         return report_paths
 

@@ -22,6 +22,7 @@ from ..core.parallel_executor import ParallelExecutor
 from ..scanners.security.trivy_scanner import TrivyScanner
 from ..scanners.security.checkov_scanner import CheckovScanner
 from ..scanners.security.gitleaks_scanner import GitleaksScanner
+from ..scanners.security.builtin_secret_scanner import BuiltinSecretScanner
 from ..database.storage import LocalStorage
 from ..database.models import ProjectRecord, ScanRecord, IssueRecord, TrendData
 from ..reporters.report_generator import ReportGenerator
@@ -75,7 +76,7 @@ def cli(ctx: click.Context, data_dir: Optional[str]):
 @click.option("--ai/--no-ai", default=True, help="Enable/disable AI insights")
 @click.option("--threshold", type=float, default=70.0, help="Production readiness threshold")
 @click.option("--scanner", "-s", "scanners", multiple=True,
-              type=click.Choice(["trivy", "checkov", "gitleaks", "all"]),
+              type=click.Choice(["trivy", "checkov", "gitleaks", "builtin", "all"]),
               default=["all"], help="Scanners to use")
 @click.pass_context
 def scan(
@@ -97,6 +98,12 @@ def scan(
     output_dir = output or str(target_path / "prc_reports")
     data_dir = ctx.obj.get("data_dir")
 
+    # Check for OpenAI API key if AI is enabled
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if ai and not openai_key:
+        console.print("[yellow]Note: OPENAI_API_KEY not set. AI insights will use fallback mode.[/yellow]")
+        console.print("[dim]Set it with: export OPENAI_API_KEY=your-api-key[/dim]\n")
+
     console.print(Panel.fit(
         f"[bold blue]Production Readiness Checker[/bold blue]\n"
         f"Scanning: [cyan]{target_path}[/cyan]",
@@ -115,7 +122,74 @@ def scan(
     )
     project = storage.create_project(project)
 
-    # Run the scan
+    # Run the scan using a single event loop to avoid asyncio issues
+    async def run_full_scan():
+        """Run the complete scan workflow in a single async context."""
+        nonlocal output_dir
+
+        # Initialize scanners
+        active_scanners = []
+        external_available = False
+
+        scanner_list = list(scanners)
+        if "all" in scanner_list:
+            # Always include builtin scanner with external tools
+            scanner_list = ["trivy", "checkov", "gitleaks", "builtin"]
+
+        for scanner_name in scanner_list:
+            if scanner_name == "trivy":
+                scanner = TrivyScanner()
+                if scanner.is_available():
+                    active_scanners.append(scanner)
+                    external_available = True
+            elif scanner_name == "checkov":
+                scanner = CheckovScanner()
+                if scanner.is_available():
+                    active_scanners.append(scanner)
+                    external_available = True
+            elif scanner_name == "gitleaks":
+                scanner = GitleaksScanner()
+                if scanner.is_available():
+                    active_scanners.append(scanner)
+                    external_available = True
+            elif scanner_name == "builtin":
+                # Built-in scanner is always available and always runs
+                active_scanners.append(BuiltinSecretScanner())
+
+        # Ensure built-in scanner is included if no external tools and not already added
+        if not external_available and not any(isinstance(s, BuiltinSecretScanner) for s in active_scanners):
+            active_scanners.append(BuiltinSecretScanner())
+
+        if not active_scanners:
+            return None, None, []
+
+        # Run scans
+        executor = ParallelExecutor()
+        executor.add_scanners(active_scanners)
+        execution_result = await executor.execute(str(target_path))
+        scan_results = execution_result.scan_results
+
+        # Calculate score
+        scorer = Scorer(readiness_threshold=threshold)
+        score = scorer.calculate_score(scan_results)
+
+        # Generate reports
+        generator = ReportGenerator(
+            output_dir=output_dir,
+            enable_ai_insights=ai,
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+        )
+        report_paths = await generator.generate_reports(
+            project_name=project_name,
+            project_path=str(target_path),
+            scan_results=scan_results,
+            score=score,
+            formats=list(formats),
+            include_ai=ai,
+        )
+
+        return score, report_paths, scan_results, active_scanners
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -129,81 +203,57 @@ def scan(
         progress.update(task, completed=True)
         console.print(f"  Found [green]{discovered.total_files}[/green] files to analyze")
 
-        # Initialize scanners
+        # Initialize and run scan
         task = progress.add_task("[cyan]Initializing scanners...", total=None)
-        active_scanners = []
 
+        # Show scanner initialization info
         scanner_list = list(scanners)
         if "all" in scanner_list:
-            scanner_list = ["trivy", "checkov", "gitleaks"]
+            scanner_list = ["trivy", "checkov", "gitleaks", "builtin"]
 
         for scanner_name in scanner_list:
             if scanner_name == "trivy":
                 scanner = TrivyScanner()
-                if scanner.is_available():
-                    active_scanners.append(scanner)
-                else:
+                if not scanner.is_available():
                     console.print(f"  [yellow]Warning: Trivy not available[/yellow]")
             elif scanner_name == "checkov":
                 scanner = CheckovScanner()
-                if scanner.is_available():
-                    active_scanners.append(scanner)
-                else:
+                if not scanner.is_available():
                     console.print(f"  [yellow]Warning: Checkov not available[/yellow]")
             elif scanner_name == "gitleaks":
                 scanner = GitleaksScanner()
-                if scanner.is_available():
-                    active_scanners.append(scanner)
-                else:
+                if not scanner.is_available():
                     console.print(f"  [yellow]Warning: Gitleaks not available[/yellow]")
 
         progress.update(task, completed=True)
 
-        if not active_scanners:
-            console.print("[red]Error: No scanners available. Please install trivy, checkov, or gitleaks.[/red]")
+        # Run the full scan in a single event loop
+        task = progress.add_task("[cyan]Running security scans...", total=None)
+
+        # Use asyncio.run with proper cleanup
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(run_full_scan())
+        finally:
+            # Proper cleanup of pending tasks and transports
+            pending = asyncio.all_tasks(loop)
+            for pending_task in pending:
+                pending_task.cancel()
+            # Give cancelled tasks a chance to complete
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+
+        if result[0] is None:
+            console.print("[red]Error: No scanners available.[/red]")
             sys.exit(1)
 
+        score, report_paths, scan_results, active_scanners = result
+
+        progress.update(task, completed=True)
         console.print(f"  Active scanners: [green]{', '.join(s.name for s in active_scanners)}[/green]")
-
-        # Run scans
-        task = progress.add_task("[cyan]Running security scans...", total=len(active_scanners))
-        scan_results: List[ScanResult] = []
-
-        async def run_scans():
-            executor = ParallelExecutor()
-            executor.add_scanners(active_scanners)
-            return await executor.execute(str(target_path))
-
-        execution_result = asyncio.run(run_scans())
-        scan_results = execution_result.scan_results
-        progress.update(task, advance=len(active_scanners))
-
-        # Calculate score
-        task = progress.add_task("[cyan]Calculating scores...", total=None)
-        scorer = Scorer(readiness_threshold=threshold)
-        score = scorer.calculate_score(scan_results)
-        progress.update(task, completed=True)
-
-        # Generate reports
-        task = progress.add_task("[cyan]Generating reports...", total=None)
-
-        async def generate_reports():
-            generator = ReportGenerator(
-                output_dir=output_dir,
-                enable_ai_insights=ai,
-                openai_api_key=os.getenv("OPENAI_API_KEY"),
-            )
-            return await generator.generate_reports(
-                project_name=project_name,
-                project_path=str(target_path),
-                scan_results=scan_results,
-                score=score,
-                formats=list(formats),
-                include_ai=ai,
-            )
-
-        report_paths = asyncio.run(generate_reports())
-        progress.update(task, completed=True)
 
     # Display results
     console.print()
@@ -414,6 +464,7 @@ def check_tools():
         ("Trivy", TrivyScanner()),
         ("Checkov", CheckovScanner()),
         ("Gitleaks", GitleaksScanner()),
+        ("Built-in Secret Scanner", BuiltinSecretScanner()),
     ]
 
     table = Table()
@@ -424,7 +475,10 @@ def check_tools():
     for name, scanner in tools:
         if scanner.is_available():
             status = "[green]Available[/green]"
-            install = "[dim]Installed[/dim]"
+            if name == "Built-in Secret Scanner":
+                install = "[dim]Built-in (no installation needed)[/dim]"
+            else:
+                install = "[dim]Installed[/dim]"
         else:
             status = "[red]Not Found[/red]"
             if name == "Trivy":
@@ -439,6 +493,70 @@ def check_tools():
         table.add_row(name, status, install)
 
     console.print(table)
+
+    # Check for optional dependencies
+    console.print("\n[bold]Optional Dependencies:[/bold]")
+
+    # Check ReportLab for PDF
+    try:
+        import reportlab
+        console.print("  PDF Generation (ReportLab): [green]Available[/green]")
+    except ImportError:
+        console.print("  PDF Generation (ReportLab): [yellow]Not installed[/yellow] - pip install reportlab")
+
+    # Check OpenAI
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if openai_key:
+        console.print("  AI Insights (OpenAI): [green]Configured[/green]")
+    else:
+        console.print("  AI Insights (OpenAI): [yellow]Not configured[/yellow] - Set OPENAI_API_KEY environment variable")
+
+
+@cli.command("config")
+def config():
+    """Show configuration and environment variables."""
+    console.print(Panel.fit(
+        "[bold]Configuration Guide[/bold]",
+        border_style="blue"
+    ))
+
+    console.print("\n[bold]Environment Variables:[/bold]\n")
+
+    env_vars = [
+        ("OPENAI_API_KEY", "OpenAI API key for AI-powered insights", os.getenv("OPENAI_API_KEY")),
+        ("PRC_DATA_DIR", "Data directory for local storage", os.getenv("PRC_DATA_DIR", "~/.prc")),
+    ]
+
+    table = Table()
+    table.add_column("Variable", style="cyan")
+    table.add_column("Description")
+    table.add_column("Status")
+
+    for var_name, description, value in env_vars:
+        if value:
+            if "KEY" in var_name or "SECRET" in var_name:
+                status = "[green]Set[/green] (hidden)"
+            else:
+                status = f"[green]{value}[/green]"
+        else:
+            status = "[yellow]Not set[/yellow]"
+
+        table.add_row(var_name, description, status)
+
+    console.print(table)
+
+    console.print("\n[bold]How to set environment variables:[/bold]\n")
+    console.print("  [cyan]Linux/macOS (temporary):[/cyan]")
+    console.print("    export OPENAI_API_KEY=your-api-key-here\n")
+    console.print("  [cyan]Linux/macOS (permanent - add to ~/.bashrc or ~/.zshrc):[/cyan]")
+    console.print("    echo 'export OPENAI_API_KEY=your-api-key-here' >> ~/.bashrc\n")
+    console.print("  [cyan]Windows (Command Prompt):[/cyan]")
+    console.print("    set OPENAI_API_KEY=your-api-key-here\n")
+    console.print("  [cyan]Windows (PowerShell):[/cyan]")
+    console.print("    $env:OPENAI_API_KEY=\"your-api-key-here\"\n")
+    console.print("  [cyan]Using .env file (with python-dotenv):[/cyan]")
+    console.print("    Create a .env file with: OPENAI_API_KEY=your-api-key-here")
+    console.print("    The scanner will automatically load it.\n")
 
 
 def _display_scan_results(
