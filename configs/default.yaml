@@ -53,6 +53,7 @@ reporting:
   formats:
     - json
     - html
+    - pdf
 
   # Include AI insights in reports
   enable_ai_insights: true

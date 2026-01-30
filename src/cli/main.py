@@ -282,7 +282,7 @@ def scan(
 
                 scanner_list = list(scanners)
                 if "all" in scanner_list:
-                    scanner_list = ["trivy", "checkov", "gitleaks", "builtin", "performance", "reliability"]
+                    scanner_list = ["trivy", "checkov", "gitleaks", "builtin"]
 
                 for scanner_name in scanner_list:
                     if scanner_name == "trivy":
@@ -314,16 +314,6 @@ def scan(
                         scanner = BuiltinSecretScanner()
                         active_scanners.append(scanner)
                         scanner_status["Built-in Secret Scanner"] = "active"
-                    elif scanner_name == "performance":
-                        # Performance scanner (always available - no external tool)
-                        scanner = ConfigPerformanceScanner()
-                        active_scanners.append(scanner)
-                        scanner_status["Performance Scanner"] = "active"
-                    elif scanner_name == "reliability":
-                        # Reliability scanner (always available - no external tool)
-                        scanner = ConfigReliabilityScanner()
-                        active_scanners.append(scanner)
-                        scanner_status["Reliability Scanner"] = "active"
 
                 # Always ensure built-in scanner is included
                 if not any(isinstance(s, BuiltinSecretScanner) for s in active_scanners):
