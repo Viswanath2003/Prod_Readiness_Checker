@@ -21,6 +21,7 @@ from ..core.file_discovery import FileDiscovery
 from ..core.scanner import ScanResult, Severity, Issue
 from ..core.scorer import Scorer, Score
 from ..core.parallel_executor import ParallelExecutor
+from ..core.rule_equivalence import get_canonical_rule_id, normalize_file_path
 from ..scanners.security.trivy_scanner import TrivyScanner
 from ..scanners.security.checkov_scanner import CheckovScanner
 from ..scanners.security.gitleaks_scanner import GitleaksScanner
@@ -72,6 +73,10 @@ def get_score_color(score: float) -> str:
 
 def generate_issue_fingerprint(issue: Issue) -> str:
     """Generate a unique fingerprint for deduplication.
+    
+    Uses canonical rule IDs and normalized paths to ensure issues from
+    different scanners (e.g., Trivy and Checkov) that represent the same
+    underlying problem are recognized as duplicates.
 
     Args:
         issue: Issue to fingerprint
@@ -79,12 +84,19 @@ def generate_issue_fingerprint(issue: Issue) -> str:
     Returns:
         Unique fingerprint string
     """
+    # Use canonical rule ID for cross-scanner matching
+    # e.g., Trivy's DS002 and Checkov's CKV_DOCKER_3 both map to DS002
+    canonical_rule = get_canonical_rule_id(issue.rule_id or "")
+    
+    # Normalize file path to handle differences in path reporting
+    # e.g., "/Dockerfile" vs "Dockerfile"
+    normalized_path = normalize_file_path(issue.file_path or "")
+    
     # Create fingerprint from key fields
     components = [
-        issue.rule_id or "",
-        issue.file_path or "",
+        canonical_rule,
+        normalized_path,
         str(issue.line_number or ""),
-        issue.title,
     ]
     combined = "|".join(components)
     return hashlib.md5(combined.encode()).hexdigest()
@@ -216,87 +228,6 @@ def scan(
     # Track scanner status
     scanner_status: Dict[str, str] = {}  # name -> status
 
-    async def run_full_scan():
-        """Run the complete scan workflow in a single async context."""
-        nonlocal output_dir, scanner_status
-
-        # Initialize scanners
-        active_scanners = []
-        skipped_scanners = []
-
-        scanner_list = list(scanners)
-        if "all" in scanner_list:
-            scanner_list = ["trivy", "checkov", "gitleaks", "builtin"]
-
-        for scanner_name in scanner_list:
-            if scanner_name == "trivy":
-                scanner = TrivyScanner()
-                if scanner.is_available():
-                    active_scanners.append(scanner)
-                    scanner_status["Trivy"] = "active"
-                else:
-                    skipped_scanners.append(("Trivy", "not installed"))
-                    scanner_status["Trivy"] = "skipped (not installed)"
-            elif scanner_name == "checkov":
-                scanner = CheckovScanner()
-                if scanner.is_available():
-                    active_scanners.append(scanner)
-                    scanner_status["Checkov"] = "active"
-                else:
-                    skipped_scanners.append(("Checkov", "not installed"))
-                    scanner_status["Checkov"] = "skipped (not installed)"
-            elif scanner_name == "gitleaks":
-                scanner = GitleaksScanner()
-                if scanner.is_available():
-                    active_scanners.append(scanner)
-                    scanner_status["Gitleaks"] = "active"
-                else:
-                    skipped_scanners.append(("Gitleaks", "not installed"))
-                    scanner_status["Gitleaks"] = "skipped (not installed)"
-            elif scanner_name == "builtin":
-                # Built-in scanner with exclusions
-                scanner = BuiltinSecretScanner()
-                active_scanners.append(scanner)
-                scanner_status["Built-in Secret Scanner"] = "active"
-
-        # Always ensure built-in scanner is included
-        if not any(isinstance(s, BuiltinSecretScanner) for s in active_scanners):
-            active_scanners.append(BuiltinSecretScanner())
-            scanner_status["Built-in Secret Scanner"] = "active"
-
-        if not active_scanners:
-            return None, None, [], skipped_scanners
-
-        # Run scans
-        executor = ParallelExecutor()
-        executor.add_scanners(active_scanners)
-        execution_result = await executor.execute(str(target_path))
-        scan_results = execution_result.scan_results
-
-        # Deduplicate issues across all scanners
-        scan_results = deduplicate_scan_results(scan_results)
-
-        # Calculate score
-        scorer = Scorer(readiness_threshold=threshold)
-        score = scorer.calculate_score(scan_results)
-
-        # Generate reports
-        generator = ReportGenerator(
-            output_dir=output_dir,
-            enable_ai_insights=ai,
-            openai_api_key=os.getenv("OPENAI_API_KEY"),
-        )
-        report_paths = await generator.generate_reports(
-            project_name=project_name,
-            project_path=str(target_path),
-            scan_results=scan_results,
-            score=score,
-            formats=list(formats),
-            include_ai=ai,
-        )
-
-        return score, report_paths, scan_results, skipped_scanners
-
     # Track timing
     scan_start_time = time.time()
 
@@ -309,6 +240,9 @@ def scan(
     # Run the full scan with progress
     console.print("[cyan]Phase 2/3:[/cyan] Running security scans...")
 
+    # Store for tracking progress updates
+    progress_state = {"task": None, "progress_bar": None}
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -320,13 +254,118 @@ def scan(
     ) as progress:
         # Create task for overall scan progress
         scan_task = progress.add_task("[cyan]Scanning...", total=100)
+        progress_state["task"] = scan_task
+        progress_state["progress_bar"] = progress
+
+        # Define progress update callback that updates the Rich progress bar
+        def update_progress(percent, description):
+            progress.update(scan_task, completed=percent, description=f"[cyan]{description}")
 
         # Use asyncio.run() which handles cleanup properly
         try:
-            # Update progress as we go
-            progress.update(scan_task, completed=10, description="[cyan]Initializing scanners...")
-            result = asyncio.run(run_full_scan())
-            progress.update(scan_task, completed=90, description="[cyan]Processing results...")
+            # Initial progress update
+            progress.update(scan_task, completed=5, description="[cyan]Initializing scanners...")
+            
+            # Run the async function with progress callback
+            async def run_with_progress():
+                return await run_full_scan_with_callback(update_progress)
+            
+            # Wrapper to pass the callback
+            async def run_full_scan_with_callback(progress_update_callback):
+                nonlocal output_dir, scanner_status
+
+                # Initialize scanners
+                active_scanners = []
+                skipped_scanners = []
+
+                scanner_list = list(scanners)
+                if "all" in scanner_list:
+                    scanner_list = ["trivy", "checkov", "gitleaks", "builtin"]
+
+                for scanner_name in scanner_list:
+                    if scanner_name == "trivy":
+                        scanner = TrivyScanner()
+                        if scanner.is_available():
+                            active_scanners.append(scanner)
+                            scanner_status["Trivy"] = "active"
+                        else:
+                            skipped_scanners.append(("Trivy", "not installed"))
+                            scanner_status["Trivy"] = "skipped (not installed)"
+                    elif scanner_name == "checkov":
+                        scanner = CheckovScanner()
+                        if scanner.is_available():
+                            active_scanners.append(scanner)
+                            scanner_status["Checkov"] = "active"
+                        else:
+                            skipped_scanners.append(("Checkov", "not installed"))
+                            scanner_status["Checkov"] = "skipped (not installed)"
+                    elif scanner_name == "gitleaks":
+                        scanner = GitleaksScanner()
+                        if scanner.is_available():
+                            active_scanners.append(scanner)
+                            scanner_status["Gitleaks"] = "active"
+                        else:
+                            skipped_scanners.append(("Gitleaks", "not installed"))
+                            scanner_status["Gitleaks"] = "skipped (not installed)"
+                    elif scanner_name == "builtin":
+                        # Built-in scanner with exclusions
+                        scanner = BuiltinSecretScanner()
+                        active_scanners.append(scanner)
+                        scanner_status["Built-in Secret Scanner"] = "active"
+
+                # Always ensure built-in scanner is included
+                if not any(isinstance(s, BuiltinSecretScanner) for s in active_scanners):
+                    active_scanners.append(BuiltinSecretScanner())
+                    scanner_status["Built-in Secret Scanner"] = "active"
+
+                if not active_scanners:
+                    return None, None, [], skipped_scanners
+
+                # Run scans with progress callback
+                executor = ParallelExecutor()
+                executor.add_scanners(active_scanners)
+                
+                # Create a callback to report progress
+                def on_scanner_complete(completed, total, scanner_name):
+                    # Report progress: scanners take 10-80% of progress
+                    progress_percent = 10 + int((completed / total) * 70)
+                    if progress_update_callback:
+                        progress_update_callback(progress_percent, f"Completed {scanner_name} ({completed}/{total})")
+                
+                execution_result = await executor.execute(str(target_path), progress_callback=on_scanner_complete)
+                scan_results = execution_result.scan_results
+
+                # Deduplicate issues across all scanners
+                if progress_update_callback:
+                    progress_update_callback(82, "Deduplicating issues...")
+                scan_results = deduplicate_scan_results(scan_results)
+
+                # Calculate score
+                if progress_update_callback:
+                    progress_update_callback(85, "Calculating score...")
+                scorer = Scorer(readiness_threshold=threshold)
+                score = scorer.calculate_score(scan_results)
+
+                # Generate reports
+                if progress_update_callback:
+                    progress_update_callback(88, "Generating reports...")
+                generator = ReportGenerator(
+                    output_dir=output_dir,
+                    enable_ai_insights=ai,
+                    openai_api_key=os.getenv("OPENAI_API_KEY"),
+                )
+                report_paths = await generator.generate_reports(
+                    project_name=project_name,
+                    project_path=str(target_path),
+                    scan_results=scan_results,
+                    score=score,
+                    formats=list(formats),
+                    include_ai=ai,
+                )
+
+                return score, report_paths, scan_results, skipped_scanners
+            
+            result = asyncio.run(run_with_progress())
         except Exception as e:
             console.print(f"[red]Error during scan: {e}[/red]")
             sys.exit(1)

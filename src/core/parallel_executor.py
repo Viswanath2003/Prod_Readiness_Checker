@@ -76,11 +76,13 @@ class ParallelExecutor:
         self.scanners.extend(scanners)
         return self
 
-    async def execute(self, target_path: str) -> ExecutionResult:
+    async def execute(self, target_path: str, progress_callback=None) -> ExecutionResult:
         """Execute all scanners in parallel.
 
         Args:
             target_path: Path to scan
+            progress_callback: Optional callback function called with (completed_count, total_count, scanner_name)
+                              when each scanner completes
 
         Returns:
             ExecutionResult with all scan results
@@ -95,37 +97,47 @@ class ParallelExecutor:
             result.completed_at = datetime.now()
             return result
 
+        # Track completed scanners for progress reporting
+        completed_count = 0
+        total_scanners = len(self.scanners)
+
         # Create semaphore for concurrency control
         semaphore = asyncio.Semaphore(self.max_concurrent)
 
         async def run_scanner(scanner: BaseScanner) -> Optional[ScanResult]:
+            nonlocal completed_count
             """Run a single scanner with semaphore."""
+            scan_result = None
             async with semaphore:
                 try:
                     # Check if scanner is available
                     if not scanner.is_available():
                         result.errors[scanner.name] = "Scanner not available"
                         result.failed_scans += 1
-                        return None
-
-                    # Run with timeout
-                    scan_result = await asyncio.wait_for(
-                        scanner.scan(target_path),
-                        timeout=self.timeout_per_scanner,
-                    )
-                    return scan_result
+                    else:
+                        # Run with timeout
+                        scan_result = await asyncio.wait_for(
+                            scanner.scan(target_path),
+                            timeout=self.timeout_per_scanner,
+                        )
 
                 except asyncio.TimeoutError:
                     result.errors[scanner.name] = (
                         f"Scanner timed out after {self.timeout_per_scanner}s"
                     )
                     result.failed_scans += 1
-                    return None
 
                 except Exception as e:
                     result.errors[scanner.name] = str(e)
                     result.failed_scans += 1
-                    return None
+                
+                finally:
+                    # Update progress after scanner completes (success or failure)
+                    completed_count += 1
+                    if progress_callback:
+                        progress_callback(completed_count, total_scanners, scanner.name)
+                
+                return scan_result
 
         # Run all scanners concurrently
         tasks = [run_scanner(scanner) for scanner in self.scanners]

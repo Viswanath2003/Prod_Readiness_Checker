@@ -4,7 +4,7 @@ import json
 import hashlib
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ...core.scanner import (
     BaseScanner,
@@ -48,6 +48,19 @@ class CheckovScanner(BaseScanner):
         "serverless": ["serverless.yml", "serverless.yaml"],
     }
 
+    # Default frameworks for Checkov - focus on IaC that Trivy doesn't cover well
+    # Dockerfile scanning is handled by Trivy to avoid duplicates
+    IAC_FRAMEWORKS = [
+        "terraform",
+        "cloudformation", 
+        "kubernetes",
+        "helm",
+        "arm",
+        "serverless",
+        "bicep",
+        "kustomize",
+    ]
+
     def __init__(
         self,
         frameworks: Optional[List[str]] = None,
@@ -56,19 +69,30 @@ class CheckovScanner(BaseScanner):
         soft_fail: bool = True,
         external_checks_dir: Optional[str] = None,
         config_file: Optional[str] = None,
+        include_dockerfile: bool = False,
     ):
         """Initialize the Checkov scanner.
 
         Args:
-            frameworks: List of frameworks to scan (None = all)
+            frameworks: List of frameworks to scan (None = IaC only by default)
             skip_checks: List of check IDs to skip
             include_checks: List of check IDs to include only
             soft_fail: Don't fail on findings (for CI/CD)
             external_checks_dir: Directory with custom checks
             config_file: Path to Checkov config file
+            include_dockerfile: Whether to scan Dockerfiles (False = Trivy handles these)
         """
         super().__init__(name="checkov", scan_type="security")
-        self.frameworks = frameworks
+        
+        # By default, focus on IaC frameworks that Trivy doesn't cover well
+        # Trivy already handles Dockerfile scanning
+        if frameworks is None:
+            self.frameworks = self.IAC_FRAMEWORKS.copy()
+            if include_dockerfile:
+                self.frameworks.append("dockerfile")
+        else:
+            self.frameworks = frameworks
+            
         self.skip_checks = skip_checks or []
         self.include_checks = include_checks
         self.soft_fail = soft_fail
@@ -109,12 +133,14 @@ class CheckovScanner(BaseScanner):
                 error_message=f"Checkov failed: {stderr}"
             )
 
-        # Parse results
-        result.issues = self._parse_results(stdout)
+        # Parse results and get resource count
+        result.issues, total_resources = self._parse_results_with_stats(stdout)
         result.metadata = {
             "target_path": str(target_path),
             "frameworks": self.frameworks or "all",
             "skipped_checks": self.skip_checks,
+            "total_resources_scanned": total_resources,
+            "iac_files_found": total_resources > 0,
         }
 
         return self._complete_result(result, started_at)
@@ -162,16 +188,17 @@ class CheckovScanner(BaseScanner):
 
         return cmd
 
-    def _parse_results(self, output: str) -> List[Issue]:
-        """Parse Checkov scan output.
+    def _parse_results_with_stats(self, output: str) -> Tuple[List[Issue], int]:
+        """Parse Checkov scan output and return stats.
 
         Args:
             output: JSON output from Checkov
 
         Returns:
-            List of Issue objects
+            Tuple of (List of Issue objects, total resources scanned)
         """
         issues = []
+        total_resources = 0
 
         # Checkov may output multiple JSON objects for different checks
         # Try to parse as a list first, then as single object
@@ -187,9 +214,9 @@ class CheckovScanner(BaseScanner):
                 if json_start != -1:
                     data = json.loads(output[json_start:])
                 else:
-                    return issues
+                    return issues, total_resources
             except json.JSONDecodeError:
-                return issues
+                return issues, total_resources
 
         # Handle both single result and list of results
         if isinstance(data, list):
@@ -203,6 +230,10 @@ class CheckovScanner(BaseScanner):
             passed_checks = result_data.get("results", {}).get("passed_checks", [])
             failed_checks = result_data.get("results", {}).get("failed_checks", [])
             skipped_checks = result_data.get("results", {}).get("skipped_checks", [])
+            
+            # Get resource count from summary
+            summary = result_data.get("summary", {})
+            total_resources += summary.get("resource_count", 0)
 
             # Process failed checks (these are the issues)
             for check in failed_checks:
@@ -210,6 +241,18 @@ class CheckovScanner(BaseScanner):
                 if issue:
                     issues.append(issue)
 
+        return issues, total_resources
+    
+    def _parse_results(self, output: str) -> List[Issue]:
+        """Parse Checkov scan output (legacy method for compatibility).
+
+        Args:
+            output: JSON output from Checkov
+
+        Returns:
+            List of Issue objects
+        """
+        issues, _ = self._parse_results_with_stats(output)
         return issues
 
     def _create_issue_from_check(
@@ -291,9 +334,10 @@ class CheckovScanner(BaseScanner):
         Returns:
             Severity level
         """
-        # Check if severity is directly provided
-        if "severity" in check:
-            return self.SEVERITY_MAP.get(check["severity"].upper(), Severity.MEDIUM)
+        # Check if severity is directly provided and not None
+        severity_value = check.get("severity")
+        if severity_value is not None:
+            return self.SEVERITY_MAP.get(severity_value.upper(), Severity.MEDIUM)
 
         # Determine based on check ID patterns
         # CKV_AWS_*, CKV_AZURE_*, CKV_GCP_* - Cloud provider checks
