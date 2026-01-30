@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-app
+  labels:
+    app: sample
+spec:
+  replicas: 1  # Single replica - reliability issue
+  selector:
+    matchLabels:
+      app: sample
+  template:
+    metadata:
+      labels:
+        app: sample
+    spec:
+      containers:
+      - name: sample-container
+        image: sample:latest
+        ports:
+        - containerPort: 8080
+        # Missing resource limits - performance issue
+        # Missing liveness/readiness probes - reliability issue
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sample-service
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8080
+  selector:
+    app: sample
