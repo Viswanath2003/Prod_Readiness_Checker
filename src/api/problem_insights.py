@@ -259,11 +259,33 @@ Be concise but thorough. Focus on practical fixes."""
         Returns:
             ProcessedResults with explanation and recommendation filled in
         """
-        for problem in processed_results.unique_problems:
-            insight = await self.generate_problem_insight(problem)
-            if insight:
-                problem.explanation = insight.explanation
-                problem.recommendation = insight.recommendation
+        # Process problems with concurrency limit to avoid overwhelming the API
+        semaphore = asyncio.Semaphore(3)  # Max 3 concurrent requests
+
+        async def process_with_semaphore(problem: UniqueProblem):
+            async with semaphore:
+                insight = await self.generate_problem_insight(problem)
+                if insight:
+                    problem.explanation = insight.explanation
+                    problem.recommendation = insight.recommendation
+
+        # Create tasks for all problems
+        tasks = [process_with_semaphore(p) for p in processed_results.unique_problems]
+
+        # Run with overall timeout (2 minutes max for all insights)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=120.0
+            )
+        except asyncio.TimeoutError:
+            print("Warning: Some AI insights timed out, using fallback for remaining")
+            # Fill in fallback insights for any that didn't complete
+            for problem in processed_results.unique_problems:
+                if not problem.explanation:
+                    fallback = self._generate_fallback_insight(problem)
+                    problem.explanation = fallback.explanation
+                    problem.recommendation = fallback.recommendation
 
         return processed_results
 
@@ -310,54 +332,52 @@ Be concise but thorough. Focus on practical fixes."""
         Returns:
             Generated ProblemInsight
         """
-        prompt = f"""Generate a production readiness insight for this problem:
-
-Problem Key: {problem.problem_key}
+        # Use shorter prompt to reduce tokens and latency
+        prompt = f"""Problem: {problem.title}
 Dimension: {problem.dimension}
-Title: {problem.title}
-Description: {problem.description}
 Severity: {problem.final_severity.value}
-Affected Files: {len(problem.affected_files)} files
-Occurrences: {problem.occurrence_count}
+Files affected: {len(problem.affected_files)}
 
-Provide a JSON response with:
-{{
-    "explanation": "Clear explanation of what this issue is",
-    "why_it_matters": "Why this matters for production systems",
-    "recommendation": "Specific actionable recommendation",
-    "example_fix": "Code/config example if applicable, or null",
-    "priority_level": "critical/high/medium/low",
-    "estimated_effort": "Time estimate to fix"
-}}"""
+Generate JSON with: explanation, why_it_matters, recommendation, priority_level"""
 
-        response = await self.ai_provider.complete(
-            messages=[
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=800,
-            temperature=0.3,
-            json_mode=True,
-        )
+        try:
+            response = await asyncio.wait_for(
+                self.ai_provider.complete(
+                    messages=[
+                        {"role": "system", "content": "You are a DevOps expert. Provide concise production readiness guidance. Respond with valid JSON only."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=400,
+                    temperature=0.3,
+                    json_mode=True,
+                ),
+                timeout=20.0  # 20 second timeout per insight
+            )
 
-        content = response.content
-        # Clean up JSON if needed
-        content = content.strip()
-        if content.startswith("```"):
-            content = re.sub(r'^```\w*\n?', '', content)
-            content = re.sub(r'\n?```$', '', content)
+            content = response.content.strip()
+            if content.startswith("```"):
+                content = re.sub(r'^```\w*\n?', '', content)
+                content = re.sub(r'\n?```$', '', content)
 
-        data = json.loads(content)
+            data = json.loads(content)
 
-        return ProblemInsight(
-            problem_key=problem.problem_key,
-            explanation=data.get("explanation", problem.description),
-            why_it_matters=data.get("why_it_matters", ""),
-            recommendation=data.get("recommendation", "Review and fix this issue."),
-            example_fix=data.get("example_fix"),
-            priority_level=data.get("priority_level", "medium"),
-            estimated_effort=data.get("estimated_effort", "varies"),
-        )
+            # Validate that data is a dict
+            if not isinstance(data, dict):
+                return self._generate_fallback_insight(problem)
+
+            return ProblemInsight(
+                problem_key=problem.problem_key,
+                explanation=data.get("explanation", problem.description) if isinstance(data.get("explanation"), str) else problem.description,
+                why_it_matters=data.get("why_it_matters", "") if isinstance(data.get("why_it_matters"), str) else "",
+                recommendation=data.get("recommendation", "Review and fix this issue.") if isinstance(data.get("recommendation"), str) else "Review and fix this issue.",
+                example_fix=data.get("example_fix") if isinstance(data.get("example_fix"), str) else None,
+                priority_level=data.get("priority_level", "medium") if isinstance(data.get("priority_level"), str) else "medium",
+                estimated_effort=data.get("estimated_effort", "varies") if isinstance(data.get("estimated_effort"), str) else "varies",
+            )
+        except asyncio.TimeoutError:
+            return self._generate_fallback_insight(problem)
+        except json.JSONDecodeError:
+            return self._generate_fallback_insight(problem)
 
     def _generate_fallback_insight(
         self,
