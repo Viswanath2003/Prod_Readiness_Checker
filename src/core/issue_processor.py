@@ -6,15 +6,15 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
-
-try:
-    from openai import AsyncOpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .scanner import Issue, IssueCategory, ScanResult, Severity
+from ..api.ai_provider import (
+    AIProvider,
+    BaseAIProvider,
+    get_provider,
+    get_available_provider,
+)
 
 
 # Dimension constants
@@ -204,28 +204,34 @@ class IssueProcessor:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gpt-4o-mini",
+        model: Optional[str] = None,
         use_ai_classification: bool = True,
+        provider: Optional[Union[str, AIProvider]] = None,
     ):
         """Initialize the issue processor.
 
         Args:
-            api_key: OpenAI API key for AI-assisted classification
-            model: Model to use for AI classification
+            api_key: API key for AI provider (optional, uses env var if not provided)
+            model: Model to use for AI classification (optional, uses provider default)
             use_ai_classification: Whether to use AI for unknown issues
+            provider: AI provider to use (openai, gemini, grok, anthropic, ollama)
         """
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.model = model
         self.use_ai_classification = use_ai_classification
+        self.ai_provider: Optional[BaseAIProvider] = None
 
-        if OPENAI_AVAILABLE and self.api_key:
-            self.client = AsyncOpenAI(api_key=self.api_key)
-        else:
-            self.client = None
+        if use_ai_classification:
+            if provider:
+                try:
+                    self.ai_provider = get_provider(provider, api_key=api_key, model=model)
+                except (ValueError, ImportError) as e:
+                    print(f"Warning: Could not initialize provider {provider}: {e}")
+            else:
+                # Auto-detect available provider
+                self.ai_provider = get_available_provider()
 
     def is_ai_available(self) -> bool:
         """Check if AI is available for classification."""
-        return OPENAI_AVAILABLE and self.api_key is not None and self.client is not None
+        return self.ai_provider is not None and self.ai_provider.is_available()
 
     async def process_scan_results(
         self,
@@ -493,17 +499,17 @@ Respond with a JSON array of objects with "index" and "dimension" fields only.
 Example: [{{"index": 0, "dimension": "security"}}, {{"index": 1, "dimension": "performance"}}]"""
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
+            response = await self.ai_provider.complete(
                 messages=[
                     {"role": "system", "content": "You are a DevOps expert classifying infrastructure issues. Respond only with valid JSON."},
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=1000,
                 temperature=0.1,
+                json_mode=True,
             )
 
-            content = response.choices[0].message.content
+            content = response.content
             # Extract JSON from response
             content = content.strip()
             if content.startswith("```"):
@@ -602,17 +608,17 @@ Respond with a JSON array of objects with "index" and "problem_key" fields only.
 Example: [{{"index": 0, "problem_key": "cpu_limits_missing"}}]"""
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
+            response = await self.ai_provider.complete(
                 messages=[
                     {"role": "system", "content": "You are a DevOps expert generating canonical problem identifiers. Respond only with valid JSON."},
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=1000,
                 temperature=0.1,
+                json_mode=True,
             )
 
-            content = response.choices[0].message.content
+            content = response.content
             content = content.strip()
             if content.startswith("```"):
                 content = re.sub(r'^```\w*\n?', '', content)

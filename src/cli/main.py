@@ -181,9 +181,11 @@ def cli(ctx: click.Context, data_dir: Optional[str]):
               type=click.Choice(["json", "html", "pdf"]), help="Output formats (default: json, html, pdf)")
 @click.option("--output", "-o", type=click.Path(), help="Output directory for reports")
 @click.option("--ai/--no-ai", default=True, help="Enable/disable AI insights")
+@click.option("--provider", "-p", type=click.Choice(["openai", "gemini", "grok", "anthropic", "ollama", "auto"]),
+              default="auto", help="AI provider to use (auto=detect from available API keys)")
 @click.option("--threshold", type=float, default=70.0, help="Production readiness threshold")
 @click.option("--scanner", "-s", "scanners", multiple=True,
-              type=click.Choice(["trivy", "checkov", "gitleaks", "builtin", "all"]),
+              type=click.Choice(["trivy", "checkov", "gitleaks", "builtin", "performance", "reliability", "all"]),
               default=["all"], help="Scanners to use")
 @click.pass_context
 def scan(
@@ -193,6 +195,7 @@ def scan(
     formats: tuple,
     output: Optional[str],
     ai: bool,
+    provider: str,
     threshold: float,
     scanners: tuple,
 ):
@@ -205,11 +208,19 @@ def scan(
     output_dir = output or str(target_path / "prc_reports")
     data_dir = ctx.obj.get("data_dir")
 
-    # Check for OpenAI API key if AI is enabled
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if ai and not openai_key:
-        console.print("[yellow]Note: OPENAI_API_KEY not set. AI insights will use fallback mode.[/yellow]")
-        console.print("[dim]Set it with: export OPENAI_API_KEY=your-api-key[/dim]\n")
+    # Check for AI provider API keys if AI is enabled
+    if ai:
+        from ..api.ai_provider import list_available_providers
+        available = [p for p in list_available_providers() if p["available"]]
+        if not available:
+            console.print("[yellow]Note: No AI provider API keys found. AI insights will use fallback mode.[/yellow]")
+            console.print("[dim]Set one of: OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, ANTHROPIC_API_KEY[/dim]")
+            console.print("[dim]Or run Ollama locally: https://ollama.ai[/dim]\n")
+        elif provider != "auto":
+            # Check if specified provider is available
+            provider_available = any(p["provider"] == provider and p["available"] for p in list_available_providers())
+            if not provider_available:
+                console.print(f"[yellow]Warning: Provider '{provider}' not available. Will try auto-detection.[/yellow]\n")
 
     console.print(Panel.fit(
         f"[bold blue]Production Readiness Checker[/bold blue]\n"
@@ -284,7 +295,7 @@ def scan(
 
                 scanner_list = list(scanners)
                 if "all" in scanner_list:
-                    scanner_list = ["trivy", "checkov", "gitleaks", "builtin"]
+                    scanner_list = ["trivy", "checkov", "gitleaks", "builtin", "performance", "reliability"]
 
                 for scanner_name in scanner_list:
                     if scanner_name == "trivy":
@@ -316,11 +327,37 @@ def scan(
                         scanner = BuiltinSecretScanner()
                         active_scanners.append(scanner)
                         scanner_status["Built-in Secret Scanner"] = "active"
+                    elif scanner_name == "performance":
+                        # Performance scanner for resource limits, scaling, etc.
+                        scanner = ConfigPerformanceScanner()
+                        if scanner.is_available():
+                            active_scanners.append(scanner)
+                            scanner_status["Performance Scanner"] = "active"
+                        else:
+                            skipped_scanners.append(("Performance Scanner", "not available"))
+                            scanner_status["Performance Scanner"] = "skipped"
+                    elif scanner_name == "reliability":
+                        # Reliability scanner for health checks, probes, etc.
+                        scanner = ConfigReliabilityScanner()
+                        if scanner.is_available():
+                            active_scanners.append(scanner)
+                            scanner_status["Reliability Scanner"] = "active"
+                        else:
+                            skipped_scanners.append(("Reliability Scanner", "not available"))
+                            scanner_status["Reliability Scanner"] = "skipped"
 
                 # Always ensure built-in scanner is included
                 if not any(isinstance(s, BuiltinSecretScanner) for s in active_scanners):
                     active_scanners.append(BuiltinSecretScanner())
                     scanner_status["Built-in Secret Scanner"] = "active"
+
+                # Always include performance and reliability scanners
+                if not any(isinstance(s, ConfigPerformanceScanner) for s in active_scanners):
+                    active_scanners.append(ConfigPerformanceScanner())
+                    scanner_status["Performance Scanner"] = "active"
+                if not any(isinstance(s, ConfigReliabilityScanner) for s in active_scanners):
+                    active_scanners.append(ConfigReliabilityScanner())
+                    scanner_status["Reliability Scanner"] = "active"
 
                 if not active_scanners:
                     return None, None, [], skipped_scanners, None
@@ -348,9 +385,12 @@ def scan(
                 if progress_update_callback:
                     progress_update_callback(83, "Processing and classifying issues...")
 
+                # Determine provider (auto = None which triggers auto-detection)
+                ai_provider = None if provider == "auto" else provider
+
                 issue_processor = IssueProcessor(
-                    api_key=os.getenv("OPENAI_API_KEY"),
                     use_ai_classification=ai,
+                    provider=ai_provider,
                 )
                 processed_results = await issue_processor.process_scan_results(scan_results)
 
@@ -360,7 +400,7 @@ def scan(
 
                 if ai:
                     problem_insights_gen = ProblemInsightsGenerator(
-                        api_key=os.getenv("OPENAI_API_KEY"),
+                        provider=ai_provider,
                     )
                     processed_results = await problem_insights_gen.generate_insights(processed_results)
 
