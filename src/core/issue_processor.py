@@ -16,6 +16,15 @@ from ..api.ai_provider import (
     get_available_provider,
 )
 
+# Import token tracker
+try:
+    from ..utils.token_tracker import GlobalTokenTracker
+except ImportError:
+    class GlobalTokenTracker:
+        @classmethod
+        def get_tracker(cls):
+            return None
+
 
 # Dimension constants
 DIMENSION_SECURITY = "security"
@@ -508,6 +517,14 @@ Example: [{{"index": 0, "dimension": "security"}}, {{"index": 1, "dimension": "p
                 temperature=0.1,
                 json_mode=True,
             )
+            
+            # Track token usage
+            tracker = GlobalTokenTracker.get_tracker()
+            if tracker and hasattr(response, 'usage') and response.usage:
+                tracker.add_usage(
+                    response.usage.get('prompt_tokens', 0),
+                    response.usage.get('completion_tokens', 0)
+                )
 
             content = response.content
             # Extract JSON from response
@@ -617,6 +634,14 @@ Example: [{{"index": 0, "problem_key": "cpu_limits_missing"}}]"""
                 temperature=0.1,
                 json_mode=True,
             )
+            
+            # Track token usage
+            tracker = GlobalTokenTracker.get_tracker()
+            if tracker and hasattr(response, 'usage') and response.usage:
+                tracker.add_usage(
+                    response.usage.get('prompt_tokens', 0),
+                    response.usage.get('completion_tokens', 0)
+                )
 
             content = response.content
             content = content.strip()

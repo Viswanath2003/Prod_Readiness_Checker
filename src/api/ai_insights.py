@@ -1,17 +1,28 @@
-"""AI Insights Module - Generate AI-powered remediation and insights using OpenAI."""
+"""AI Insights Module - Generate AI-powered insights for security and reliability issues."""
 
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 try:
-    from openai import AsyncOpenAI
+    from openai import AsyncOpenAI, AsyncAzureOpenAI
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
+
+# Import token tracker
+try:
+    from ..utils.token_tracker import GlobalTokenTracker
+except ImportError:
+    # Fallback if tracker not available
+    class GlobalTokenTracker:
+        @classmethod
+        def get_tracker(cls):
+            return None
 
 from ..core.scanner import Issue, Severity, ScanResult
 from ..core.scorer import Score
@@ -107,12 +118,29 @@ Always be specific and actionable in your recommendations."""
             temperature: Temperature for generation (0-1)
         """
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        self.azure_api_key = os.getenv("AZURE_OPENAI_KEY")
+        self.azure_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2023-05-15")
+        self.azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+        
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
 
-        if OPENAI_AVAILABLE and self.api_key:
-            self.client = AsyncOpenAI(api_key=self.api_key)
+        if OPENAI_AVAILABLE:
+            if self.azure_endpoint and self.azure_api_key:
+                # Prefer Azure if configured
+                self.client = AsyncAzureOpenAI(
+                    api_key=self.azure_api_key,
+                    api_version=self.azure_api_version,
+                    azure_endpoint=self.azure_endpoint,
+                    azure_deployment=self.azure_deployment
+                )
+            elif self.api_key:
+                # Fallback to standard OpenAI
+                self.client = AsyncOpenAI(api_key=self.api_key)
+            else:
+                self.client = None
         else:
             self.client = None
 
@@ -135,8 +163,11 @@ Always be specific and actionable in your recommendations."""
         prompt = self._build_issue_prompt(issue)
 
         try:
+            # Use deployment name for Azure, model name for standard OpenAI
+            model_param = self.azure_deployment if (self.azure_endpoint and self.azure_api_key) else self.model
+            
             response = await self.client.chat.completions.create(
-                model=self.model,
+                model=model_param,
                 messages=[
                     {"role": "system", "content": self.SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
@@ -145,6 +176,14 @@ Always be specific and actionable in your recommendations."""
                 temperature=self.temperature,
                 response_format={"type": "json_object"},
             )
+            
+            # Track token usage
+            tracker = GlobalTokenTracker.get_tracker()
+            if tracker and hasattr(response, 'usage') and response.usage:
+                tracker.add_usage(
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens
+                )
 
             content = response.choices[0].message.content
             data = json.loads(content)
@@ -168,7 +207,7 @@ Always be specific and actionable in your recommendations."""
     async def generate_batch_insights(
         self,
         issues: List[Issue],
-        max_concurrent: int = 5,
+        max_concurrent: int = 10,  # Increased from 5 to 10 for faster processing
     ) -> List[AIInsight]:
         """Generate insights for multiple issues concurrently.
 
@@ -183,7 +222,18 @@ Always be specific and actionable in your recommendations."""
 
         async def process_issue(issue: Issue) -> Optional[AIInsight]:
             async with semaphore:
-                return await self.generate_issue_insight(issue)
+                try:
+                    # Add 60 second timeout per issue (increased from 30s)
+                    return await asyncio.wait_for(
+                        self.generate_issue_insight(issue),
+                        timeout=60.0
+                    )
+                except asyncio.TimeoutError:
+                    print(f"⚠️  Timeout generating insight for {issue.id}, using fallback")
+                    return self._generate_fallback_insight(issue)
+                except Exception as e:
+                    print(f"⚠️  Error processing {issue.id}: {e}")
+                    return self._generate_fallback_insight(issue)
 
         tasks = [process_issue(issue) for issue in issues]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -215,8 +265,11 @@ Always be specific and actionable in your recommendations."""
         prompt = self._build_report_prompt(scan_results, score)
 
         try:
+            # Use deployment name for Azure, model name for standard OpenAI
+            model_param = self.azure_deployment if (self.azure_endpoint and self.azure_api_key) else self.model
+            
             response = await self.client.chat.completions.create(
-                model=self.model,
+                model=model_param,
                 messages=[
                     {"role": "system", "content": self.SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
@@ -228,6 +281,14 @@ Always be specific and actionable in your recommendations."""
 
             content = response.choices[0].message.content
             data = json.loads(content)
+            
+            # Track token usage
+            tracker = GlobalTokenTracker.get_tracker()
+            if tracker and hasattr(response, 'usage') and response.usage:
+                tracker.add_usage(
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens
+                )
 
             return ReportInsights(
                 executive_summary=data.get("executive_summary", ""),

@@ -118,14 +118,32 @@ class OpenAIProvider(BaseAIProvider):
         json_mode: bool = False,
     ) -> AIResponse:
         try:
-            from openai import AsyncOpenAI
+            from openai import AsyncOpenAI, AsyncAzureOpenAI
         except ImportError:
             raise ImportError("openai package not installed. Run: pip install openai")
 
-        client = AsyncOpenAI(api_key=self.get_api_key())
+        # Check for Azure configuration
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        azure_key = os.getenv("AZURE_OPENAI_KEY")
+        azure_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2023-05-15")
+        azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+
+        if azure_endpoint and azure_key:
+            client = AsyncAzureOpenAI(
+                api_key=azure_key,
+                api_version=azure_api_version,
+                azure_endpoint=azure_endpoint,
+                azure_deployment=azure_deployment
+            )
+            # Use deployment name for Azure
+            model_to_use = azure_deployment
+        else:
+            client = AsyncOpenAI(api_key=self.get_api_key())
+            # Use model name for standard OpenAI
+            model_to_use = self.model
 
         kwargs = {
-            "model": self.model,
+            "model": model_to_use,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,

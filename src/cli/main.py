@@ -1,21 +1,32 @@
-"""Main CLI Module - Command-line interface for Production Readiness Checker."""
+"""Main CLI Module - Command Line Interface for Production Readiness Checker."""
 
 import asyncio
+import json
 import os
 import sys
-import hashlib
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import click
+import hashlib
+from dotenv import load_dotenv
 from rich.console import Console
-from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn, TaskProgressColumn
 from rich.table import Table
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
+
+# Import token tracker
+try:
+    from ..utils.token_tracker import GlobalTokenTracker
+except ImportError:
+    GlobalTokenTracker = None
 from rich.text import Text
 from rich import print as rprint
+
+# Load environment variables from .env file
+load_dotenv()
 
 from ..core.file_discovery import FileDiscovery
 from ..core.scanner import ScanResult, Severity, Issue
@@ -847,6 +858,14 @@ def _display_scan_results(
         console.print("\n[bold]Reports Generated:[/bold]")
         for fmt, path in report_paths.items():
             console.print(f"  {fmt.upper()}: [cyan]{path}[/cyan]")
+        
+        # Display AI token usage summary
+        if GlobalTokenTracker:
+            tracker = GlobalTokenTracker.get_tracker()
+            if tracker and tracker.request_count > 0:
+                console.print("\n")
+                tracker.print_summary()
+                tracker.save_to_file("ai_usage_log.json")
 
 
 def _save_to_storage(

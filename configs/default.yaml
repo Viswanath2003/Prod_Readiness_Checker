@@ -63,10 +63,14 @@ reporting:
 
 # AI Configuration
 ai:
-  # OpenAI model to use
-  model: "gpt-4o-mini"
+  # Azure OpenAI deployment name (or standard OpenAI model)
+  model: "gpt-4o"
   max_tokens: 2000
   temperature: 0.3
+  
+  # Azure-specific settings
+  use_azure: true
+  api_version: "2025-01-01-preview"
 
 # File Discovery Configuration
 discovery:
