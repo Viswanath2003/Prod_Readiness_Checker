@@ -48,7 +48,19 @@ class JSONReporter(BaseReporter):
         return json_str.encode("utf-8")
 
     def _build_report_structure(self, report_data: ReportData) -> Dict[str, Any]:
-        """Build the JSON report structure.
+        """Build the JSON report structure matching the expected schema.
+
+        Expected schema:
+        {
+          "report_info": { ... },
+          "summary": { ... },
+          "dimensions": {
+            "security": { score, grade, status, total_unique_problems, problems: [...] },
+            "performance": { ... },
+            "reliability": { ... },
+            "monitoring": { ... }
+          }
+        }
 
         Args:
             report_data: Report data
@@ -56,93 +68,141 @@ class JSONReporter(BaseReporter):
         Returns:
             Dictionary for JSON serialization
         """
+        # Calculate total unique problems and blocking problems
+        total_unique_problems = 0
+        blocking_problems = 0
+
+        if report_data.processed_results:
+            total_unique_problems = report_data.processed_results.total_unique_problems
+            # Count blocking problems (CRITICAL + HIGH severity)
+            for problems in report_data.processed_results.problems_by_dimension.values():
+                for p in problems:
+                    if p.final_severity.value in ["critical", "high"]:
+                        blocking_problems += 1
+
+        # Build the main report structure
         report = {
             "report_info": {
-                "title": "Production Readiness Assessment Report",
                 "project_name": report_data.project_name,
                 "project_path": report_data.project_path,
                 "generated_at": report_data.generated_at.isoformat(),
-                "report_format": self.format,
                 "version": "1.0.0",
             },
             "summary": {
                 "overall_score": round(report_data.score.overall_score, 2),
                 "grade": report_data.score.grade,
                 "status": report_data.score.status,
+                "total_unique_problems": total_unique_problems,
+                "blocking_problems": blocking_problems,
                 "is_production_ready": report_data.score.is_production_ready,
                 "readiness_threshold": report_data.score.readiness_threshold,
-                "total_issues": report_data.total_issues,
-                "blocking_issues": report_data.score.blocking_issues,
-                "severity_distribution": {
-                    "critical": report_data.critical_count,
-                    "high": report_data.high_count,
-                    "medium": sum(r.medium_count for r in report_data.scan_results),
-                    "low": sum(r.low_count for r in report_data.scan_results),
-                    "info": sum(r.info_count for r in report_data.scan_results),
-                },
             },
-            "category_scores": {
-                name: {
-                    "score": round(cat_score.score, 2),
-                    "grade": cat_score.grade,
-                    "status": cat_score.status,
-                    "weight": cat_score.weight,
-                    "issues": {
-                        "total": cat_score.issues_count,
-                        "critical": cat_score.critical_count,
-                        "high": cat_score.high_count,
-                        "medium": cat_score.medium_count,
-                        "low": cat_score.low_count,
-                        "info": cat_score.info_count,
-                    },
-                }
-                for name, cat_score in report_data.score.category_scores.items()
-            },
-            "scan_results": [
-                self._format_scan_result(result)
-                for result in report_data.scan_results
-            ],
-            "issues": [
-                self._format_issue(issue)
-                for issue in report_data.all_issues
-            ],
+            "dimensions": self._build_dimensions(report_data),
+        }
+
+        # Add severity distribution for overall view
+        report["summary"]["severity_distribution"] = {
+            "critical": report_data.critical_count,
+            "high": report_data.high_count,
+            "medium": sum(r.medium_count for r in report_data.scan_results),
+            "low": sum(r.low_count for r in report_data.scan_results),
+            "info": sum(r.info_count for r in report_data.scan_results),
         }
 
         # Add AI insights if available
         if report_data.ai_insights:
             report["ai_insights"] = report_data.ai_insights.to_dict()
 
-        # Add processed results (unique problems grouped by dimension)
-        if report_data.processed_results:
-            report["processed_results"] = {
-                "total_issues": report_data.processed_results.total_issues,
-                "total_unique_problems": report_data.processed_results.total_unique_problems,
-                "dimension_summary": report_data.processed_results.dimension_summary,
-                "problems_by_dimension": {
-                    dimension: [
-                        {
-                            "problem_key": p.problem_key,
-                            "title": p.title,
-                            "description": p.description,
-                            "final_severity": p.final_severity.value,
-                            "occurrence_count": p.occurrence_count,
-                            "affected_files": p.affected_files,
-                            "explanation": p.explanation,
-                            "recommendation": p.recommendation,
-                            "rule_ids": p.rule_ids,
-                            "scanners": p.scanners,
-                        }
-                        for p in problems
-                    ]
-                    for dimension, problems in report_data.processed_results.problems_by_dimension.items()
-                },
-            }
-
         # Add metadata if requested
         if self.include_metadata:
             report["metadata"] = report_data.metadata
 
         return report
+
+    def _build_dimensions(self, report_data: ReportData) -> Dict[str, Any]:
+        """Build the dimensions section with problems grouped correctly.
+
+        Args:
+            report_data: Report data
+
+        Returns:
+            Dimensions dictionary
+        """
+        dimensions = {}
+        dimension_names = ["security", "performance", "reliability", "monitoring"]
+
+        for dim_name in dimension_names:
+            # Get category score if available
+            cat_score = report_data.score.category_scores.get(dim_name)
+
+            # Get problems for this dimension
+            problems = []
+            if report_data.processed_results:
+                dim_problems = report_data.processed_results.problems_by_dimension.get(dim_name, [])
+                problems = [self._format_problem(p) for p in dim_problems]
+
+            dimensions[dim_name] = {
+                "score": round(cat_score.score, 2) if cat_score else 100.0,
+                "grade": cat_score.grade if cat_score else "A",
+                "status": self._get_status_from_score(cat_score.score if cat_score else 100.0),
+                "total_unique_problems": len(problems),
+                "problems": problems,
+            }
+
+        return dimensions
+
+    def _format_problem(self, problem) -> Dict[str, Any]:
+        """Format a unique problem according to the expected schema.
+
+        Args:
+            problem: UniqueProblem object
+
+        Returns:
+            Formatted problem dictionary
+        """
+        # Build example instances (first 3 occurrences with file and line info)
+        example_instances = []
+        for issue in problem.original_issues[:3]:
+            instance = {"file": issue.file_path}
+            if hasattr(issue.original_issue, 'line_number') and issue.original_issue.line_number:
+                instance["line"] = issue.original_issue.line_number
+            example_instances.append(instance)
+
+        return {
+            "problem_key": problem.problem_key,
+            "title": problem.title,
+            "dimension": problem.dimension,
+            "severity": problem.final_severity.value.upper(),
+            "confidence": "HIGH",  # Default to HIGH as issues come from scanners
+            "occurrence_count": problem.occurrence_count,
+            "affected_files_count": len(problem.affected_files),
+            "explanation": problem.explanation or problem.description,
+            "recommendation": problem.recommendation or "",
+            "affected_files": problem.affected_files,
+            "metadata": {
+                "detected_by_scanners": problem.scanners,
+                "rule_ids": problem.rule_ids,
+                "example_instances": example_instances,
+            },
+        }
+
+    def _get_status_from_score(self, score: float) -> str:
+        """Get status text from score.
+
+        Args:
+            score: Numeric score
+
+        Returns:
+            Status string
+        """
+        if score >= 90:
+            return "Excellent"
+        elif score >= 80:
+            return "Good"
+        elif score >= 60:
+            return "Warning"
+        else:
+            return "Critical"
 
     def _format_scan_result(self, result) -> Dict[str, Any]:
         """Format a scan result for the report.

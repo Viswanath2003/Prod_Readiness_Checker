@@ -5,16 +5,16 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
-
-try:
-    from openai import AsyncOpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
+from typing import Any, Dict, List, Optional, Union
 
 from ..core.issue_processor import UniqueProblem, ProcessedResults
 from ..core.scanner import Severity
+from .ai_provider import (
+    AIProvider,
+    BaseAIProvider,
+    get_provider,
+    get_available_provider,
+)
 
 
 @dataclass
@@ -222,25 +222,30 @@ Be concise but thorough. Focus on practical fixes."""
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gpt-4o-mini",
+        model: Optional[str] = None,
+        provider: Optional[Union[str, AIProvider]] = None,
     ):
         """Initialize the problem insights generator.
 
         Args:
-            api_key: OpenAI API key
+            api_key: API key for AI provider
             model: Model to use for generation
+            provider: AI provider to use (openai, gemini, grok, anthropic, ollama)
         """
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.model = model
+        self.ai_provider: Optional[BaseAIProvider] = None
 
-        if OPENAI_AVAILABLE and self.api_key:
-            self.client = AsyncOpenAI(api_key=self.api_key)
+        if provider:
+            try:
+                self.ai_provider = get_provider(provider, api_key=api_key, model=model)
+            except (ValueError, ImportError) as e:
+                print(f"Warning: Could not initialize provider {provider}: {e}")
         else:
-            self.client = None
+            # Auto-detect available provider
+            self.ai_provider = get_available_provider()
 
     def is_available(self) -> bool:
         """Check if AI is available."""
-        return OPENAI_AVAILABLE and self.api_key is not None and self.client is not None
+        return self.ai_provider is not None and self.ai_provider.is_available()
 
     async def generate_insights(
         self,
@@ -325,18 +330,23 @@ Provide a JSON response with:
     "estimated_effort": "Time estimate to fix"
 }}"""
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
+        response = await self.ai_provider.complete(
             messages=[
                 {"role": "system", "content": self.SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=800,
             temperature=0.3,
-            response_format={"type": "json_object"},
+            json_mode=True,
         )
 
-        content = response.choices[0].message.content
+        content = response.content
+        # Clean up JSON if needed
+        content = content.strip()
+        if content.startswith("```"):
+            content = re.sub(r'^```\w*\n?', '', content)
+            content = re.sub(r'\n?```$', '', content)
+
         data = json.loads(content)
 
         return ProblemInsight(
