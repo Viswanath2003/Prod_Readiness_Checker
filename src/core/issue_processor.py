@@ -483,68 +483,91 @@ class IssueProcessor:
         if not issues:
             return []
 
-        # Prepare batch prompt
+        # Process in smaller batches to avoid timeouts (max 10 at a time)
+        BATCH_SIZE = 10
+        all_dimensions = [issue.dimension for issue in issues]  # Default to existing
+
+        for batch_start in range(0, len(issues), BATCH_SIZE):
+            batch_issues = issues[batch_start:batch_start + BATCH_SIZE]
+            batch_dimensions = await self._classify_single_batch(batch_issues, batch_start)
+
+            # Update dimensions for this batch
+            for i, dim in enumerate(batch_dimensions):
+                if dim in ALL_DIMENSIONS:
+                    all_dimensions[batch_start + i] = dim
+
+        return all_dimensions
+
+    async def _classify_single_batch(
+        self,
+        issues: List[NormalizedIssue],
+        start_index: int = 0,
+    ) -> List[str]:
+        """Classify a single batch of issues."""
+        # Prepare batch prompt with minimal context
         issues_data = []
         for i, issue in enumerate(issues):
             issues_data.append({
                 "index": i,
-                "title": issue.normalized_title[:100],
-                "description": issue.normalized_description[:200],
-                "rule_id": issue.rule_id,
+                "title": issue.normalized_title[:80],
+                "rule_id": issue.rule_id or "",
             })
 
-        prompt = f"""Classify each issue into exactly ONE dimension: security, performance, reliability, or monitoring.
+        prompt = f"""Classify each issue into ONE dimension: security, performance, reliability, or monitoring.
 
-Issues to classify:
-{json.dumps(issues_data, indent=2)}
+Issues:
+{json.dumps(issues_data)}
 
-Rules:
-- security: vulnerabilities, secrets, permissions, authentication, encryption, access control
-- performance: resource limits, scaling, caching, timeouts, latency, throughput
-- reliability: health checks, availability, redundancy, failover, recovery, probes
-- monitoring: logging, metrics, tracing, alerting, observability
-
-Respond with a JSON array of objects with "index" and "dimension" fields only.
-Example: [{{"index": 0, "dimension": "security"}}, {{"index": 1, "dimension": "performance"}}]"""
+Respond with JSON array: [{{"index": 0, "dimension": "security"}}]"""
 
         try:
-            response = await self.ai_provider.complete(
-                messages=[
-                    {"role": "system", "content": "You are a DevOps expert classifying infrastructure issues. Respond only with valid JSON."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1000,
-                temperature=0.1,
-                json_mode=True,
+            response = await asyncio.wait_for(
+                self.ai_provider.complete(
+                    messages=[
+                        {"role": "system", "content": "Classify infrastructure issues. Respond with valid JSON array only."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=500,
+                    temperature=0.1,
+                    json_mode=True,
+                ),
+                timeout=30.0  # 30 second timeout
             )
-            
-            # Track token usage
-            tracker = GlobalTokenTracker.get_tracker()
-            if tracker and hasattr(response, 'usage') and response.usage:
-                tracker.add_usage(
-                    response.usage.get('prompt_tokens', 0),
-                    response.usage.get('completion_tokens', 0)
-                )
 
-            content = response.content
-            # Extract JSON from response
-            content = content.strip()
+            # Track token usage safely
+            tracker = GlobalTokenTracker.get_tracker()
+            if tracker and response.usage:
+                prompt_tokens = response.usage.get('prompt_tokens', 0) if isinstance(response.usage, dict) else 0
+                completion_tokens = response.usage.get('completion_tokens', 0) if isinstance(response.usage, dict) else 0
+                tracker.add_usage(prompt_tokens, completion_tokens)
+
+            content = response.content.strip()
             if content.startswith("```"):
                 content = re.sub(r'^```\w*\n?', '', content)
                 content = re.sub(r'\n?```$', '', content)
 
             results = json.loads(content)
 
+            # Handle case where results is not a list
+            if not isinstance(results, list):
+                return [issue.dimension for issue in issues]
+
             # Build result list maintaining order
-            dimensions = [issue.dimension for issue in issues]  # Default to existing
+            dimensions = [issue.dimension for issue in issues]
             for item in results:
+                # Skip non-dict items
+                if not isinstance(item, dict):
+                    continue
                 idx = item.get("index")
-                dim = item.get("dimension", "").lower()
-                if idx is not None and 0 <= idx < len(issues) and dim in ALL_DIMENSIONS:
+                dim = item.get("dimension", "").lower() if isinstance(item.get("dimension"), str) else ""
+                if idx is not None and isinstance(idx, int) and 0 <= idx < len(issues) and dim in ALL_DIMENSIONS:
                     dimensions[idx] = dim
 
             return dimensions
 
+        except asyncio.TimeoutError:
+            print(f"Dimension classification timeout, using rule-based")
+            return [issue.dimension for issue in issues]
         except Exception as e:
             print(f"Batch dimension classification error: {e}")
             return [issue.dimension for issue in issues]
@@ -601,62 +624,84 @@ Example: [{{"index": 0, "dimension": "security"}}, {{"index": 1, "dimension": "p
         if not issues:
             return []
 
-        # Prepare batch prompt
+        # Process in smaller batches to avoid timeouts (max 10 at a time)
+        BATCH_SIZE = 10
+        all_keys = [issue.problem_key for issue in issues]  # Default to existing
+
+        for batch_start in range(0, len(issues), BATCH_SIZE):
+            batch_issues = issues[batch_start:batch_start + BATCH_SIZE]
+            batch_keys = await self._generate_keys_single_batch(batch_issues)
+
+            # Update keys for this batch
+            for i, key in enumerate(batch_keys):
+                if key:
+                    all_keys[batch_start + i] = key
+
+        return all_keys
+
+    async def _generate_keys_single_batch(
+        self,
+        issues: List[NormalizedIssue],
+    ) -> List[str]:
+        """Generate problem keys for a single batch of issues."""
+        # Prepare batch prompt with minimal context
         issues_data = []
         for i, issue in enumerate(issues):
             issues_data.append({
                 "index": i,
-                "title": issue.normalized_title[:100],
-                "description": issue.normalized_description[:150],
-                "dimension": issue.dimension,
+                "title": issue.normalized_title[:80],
             })
 
-        prompt = f"""Generate a canonical problem key for each issue. The key should be:
-- lowercase with underscores (snake_case)
-- descriptive but concise (2-5 words)
-- represent the underlying problem type, not the specific instance
+        prompt = f"""Generate a canonical problem key for each issue (snake_case, 2-4 words).
 
 Issues:
-{json.dumps(issues_data, indent=2)}
+{json.dumps(issues_data)}
 
-Example keys: cpu_limits_missing, container_runs_as_root, liveness_probe_missing, logging_not_configured
+Example: cpu_limits_missing, liveness_probe_missing
 
-Respond with a JSON array of objects with "index" and "problem_key" fields only.
-Example: [{{"index": 0, "problem_key": "cpu_limits_missing"}}]"""
+Respond with JSON array: [{{"index": 0, "problem_key": "example_key"}}]"""
 
         try:
-            response = await self.ai_provider.complete(
-                messages=[
-                    {"role": "system", "content": "You are a DevOps expert generating canonical problem identifiers. Respond only with valid JSON."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1000,
-                temperature=0.1,
-                json_mode=True,
+            response = await asyncio.wait_for(
+                self.ai_provider.complete(
+                    messages=[
+                        {"role": "system", "content": "Generate canonical problem identifiers. Respond with valid JSON array only."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=500,
+                    temperature=0.1,
+                    json_mode=True,
+                ),
+                timeout=30.0  # 30 second timeout
             )
-            
-            # Track token usage
-            tracker = GlobalTokenTracker.get_tracker()
-            if tracker and hasattr(response, 'usage') and response.usage:
-                tracker.add_usage(
-                    response.usage.get('prompt_tokens', 0),
-                    response.usage.get('completion_tokens', 0)
-                )
 
-            content = response.content
-            content = content.strip()
+            # Track token usage safely
+            tracker = GlobalTokenTracker.get_tracker()
+            if tracker and response.usage:
+                prompt_tokens = response.usage.get('prompt_tokens', 0) if isinstance(response.usage, dict) else 0
+                completion_tokens = response.usage.get('completion_tokens', 0) if isinstance(response.usage, dict) else 0
+                tracker.add_usage(prompt_tokens, completion_tokens)
+
+            content = response.content.strip()
             if content.startswith("```"):
                 content = re.sub(r'^```\w*\n?', '', content)
                 content = re.sub(r'\n?```$', '', content)
 
             results = json.loads(content)
 
+            # Handle case where results is not a list
+            if not isinstance(results, list):
+                return [issue.problem_key for issue in issues]
+
             # Build result list maintaining order
-            keys = [issue.problem_key for issue in issues]  # Default to existing
+            keys = [issue.problem_key for issue in issues]
             for item in results:
+                # Skip non-dict items
+                if not isinstance(item, dict):
+                    continue
                 idx = item.get("index")
                 key = item.get("problem_key", "")
-                if idx is not None and 0 <= idx < len(issues) and key:
+                if idx is not None and isinstance(idx, int) and 0 <= idx < len(issues) and key and isinstance(key, str):
                     # Normalize the key
                     key = re.sub(r'[^a-z0-9_]', '_', key.lower())
                     key = re.sub(r'_+', '_', key).strip('_')
@@ -665,6 +710,9 @@ Example: [{{"index": 0, "problem_key": "cpu_limits_missing"}}]"""
 
             return keys
 
+        except asyncio.TimeoutError:
+            print(f"Problem key generation timeout, using auto-generated keys")
+            return [issue.problem_key for issue in issues]
         except Exception as e:
             print(f"Batch problem key generation error: {e}")
             return [issue.problem_key for issue in issues]
