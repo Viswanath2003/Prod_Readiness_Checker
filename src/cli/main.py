@@ -22,6 +22,7 @@ from ..core.scanner import ScanResult, Severity, Issue
 from ..core.scorer import Scorer, Score
 from ..core.parallel_executor import ParallelExecutor
 from ..core.rule_equivalence import get_canonical_rule_id, normalize_file_path
+from ..core.issue_processor import IssueProcessor, ProcessedResults
 from ..scanners.security.trivy_scanner import TrivyScanner
 from ..scanners.security.checkov_scanner import CheckovScanner
 from ..scanners.security.gitleaks_scanner import GitleaksScanner
@@ -32,6 +33,7 @@ from ..database.storage import LocalStorage
 from ..database.models import ProjectRecord, ScanRecord, IssueRecord, TrendData
 from ..reporters.report_generator import ReportGenerator
 from ..api.ai_insights import AIInsightsGenerator
+from ..api.problem_insights import ProblemInsightsGenerator
 
 console = Console()
 
@@ -321,7 +323,7 @@ def scan(
                     scanner_status["Built-in Secret Scanner"] = "active"
 
                 if not active_scanners:
-                    return None, None, [], skipped_scanners
+                    return None, None, [], skipped_scanners, None
 
                 # Run scans with progress callback
                 executor = ParallelExecutor()
@@ -339,18 +341,38 @@ def scan(
 
                 # Deduplicate issues across all scanners
                 if progress_update_callback:
-                    progress_update_callback(82, "Deduplicating issues...")
+                    progress_update_callback(80, "Deduplicating issues...")
                 scan_results = deduplicate_scan_results(scan_results)
 
-                # Calculate score
+                # Process and group issues
                 if progress_update_callback:
-                    progress_update_callback(85, "Calculating score...")
+                    progress_update_callback(83, "Processing and classifying issues...")
+
+                issue_processor = IssueProcessor(
+                    api_key=os.getenv("OPENAI_API_KEY"),
+                    use_ai_classification=ai,
+                )
+                processed_results = await issue_processor.process_scan_results(scan_results)
+
+                # Generate AI insights for unique problems
+                if progress_update_callback:
+                    progress_update_callback(86, "Generating problem insights...")
+
+                if ai:
+                    problem_insights_gen = ProblemInsightsGenerator(
+                        api_key=os.getenv("OPENAI_API_KEY"),
+                    )
+                    processed_results = await problem_insights_gen.generate_insights(processed_results)
+
+                # Calculate score based on unique problems
+                if progress_update_callback:
+                    progress_update_callback(89, "Calculating score...")
                 scorer = Scorer(readiness_threshold=threshold)
-                score = scorer.calculate_score(scan_results)
+                score = scorer.calculate_score_from_problems(processed_results)
 
                 # Generate reports
                 if progress_update_callback:
-                    progress_update_callback(88, "Generating reports...")
+                    progress_update_callback(92, "Generating reports...")
                 generator = ReportGenerator(
                     output_dir=output_dir,
                     enable_ai_insights=ai,
@@ -363,9 +385,10 @@ def scan(
                     score=score,
                     formats=list(formats),
                     include_ai=ai,
+                    processed_results=processed_results,
                 )
 
-                return score, report_paths, scan_results, skipped_scanners
+                return score, report_paths, scan_results, skipped_scanners, processed_results
             
             result = asyncio.run(run_with_progress())
         except Exception as e:
@@ -376,7 +399,7 @@ def scan(
             console.print("[red]Error: No scanners available.[/red]")
             sys.exit(1)
 
-        score, report_paths, scan_results, skipped_scanners = result
+        score, report_paths, scan_results, skipped_scanners, processed_results = result
         progress.update(scan_task, completed=100, description="[green]Scan complete!")
 
     # Calculate elapsed time
@@ -400,7 +423,7 @@ def scan(
 
     # Display results
     console.print()
-    _display_scan_results(scan_results, score, report_paths, scanner_status)
+    _display_scan_results(scan_results, score, report_paths, scanner_status, processed_results)
 
     # Save to storage
     _save_to_storage(storage, project, scan_results, score, report_paths)
@@ -713,6 +736,7 @@ def _display_scan_results(
     score: Score,
     report_paths: dict,
     scanner_status: Dict[str, str] = None,
+    processed_results: ProcessedResults = None,
 ):
     """Display scan results in the terminal."""
     # Score display
@@ -735,12 +759,36 @@ def _display_scan_results(
     medium = sum(r.medium_count for r in scan_results)
     low = sum(r.low_count for r in scan_results)
 
-    console.print(f"\n[bold]Issues Found:[/bold] {total_issues}")
-    console.print(f"  [red]Critical: {critical}[/red] | [orange1]High: {high}[/orange1] | "
+    # Display unique problems summary if available
+    if processed_results:
+        console.print(f"\n[bold]Issues Summary:[/bold]")
+        console.print(f"  Total issue instances: {processed_results.total_issues}")
+        console.print(f"  Unique problems: [cyan]{processed_results.total_unique_problems}[/cyan]")
+        console.print(f"  [dim](Scoring is based on unique problems, not total instances)[/dim]")
+    else:
+        console.print(f"\n[bold]Issues Found:[/bold] {total_issues}")
+
+    console.print(f"\n  [red]Critical: {critical}[/red] | [orange1]High: {high}[/orange1] | "
                   f"[yellow]Medium: {medium}[/yellow] | [blue]Low: {low}[/blue]")
 
-    # Issues by scanner
-    if scan_results:
+    # Unique problems by dimension
+    if processed_results and processed_results.problems_by_dimension:
+        console.print("\n[bold]Unique Problems by Dimension:[/bold]")
+        dimension_icons = {
+            "security": "🔒",
+            "performance": "⚡",
+            "reliability": "🛡️",
+            "monitoring": "📊",
+        }
+        for dimension in ["security", "performance", "reliability", "monitoring"]:
+            problems = processed_results.problems_by_dimension.get(dimension, [])
+            if problems:
+                summary = processed_results.dimension_summary.get(dimension, {})
+                icon = dimension_icons.get(dimension, "📋")
+                console.print(f"  {icon} {dimension.title()}: {len(problems)} problems "
+                             f"({summary.get('total_occurrences', 0)} occurrences)")
+    # Issues by scanner (fallback display)
+    elif scan_results:
         console.print("\n[bold]Issues by Scanner:[/bold]")
         for result in scan_results:
             if result.issue_count > 0:

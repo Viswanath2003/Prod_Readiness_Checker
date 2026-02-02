@@ -2,9 +2,12 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from .scanner import Issue, IssueCategory, ScanResult, Severity
+
+if TYPE_CHECKING:
+    from .issue_processor import ProcessedResults, UniqueProblem
 
 
 @dataclass
@@ -400,3 +403,122 @@ class Scorer:
                 suggestions.append(suggestion)
 
         return suggestions
+
+    def calculate_score_from_problems(
+        self,
+        processed_results: "ProcessedResults",
+    ) -> Score:
+        """Calculate score based on unique problems instead of individual issues.
+
+        This method scores per unique problem type, not per issue instance.
+        For example, 10 files missing CPU limits = 1 problem scored once.
+
+        Args:
+            processed_results: ProcessedResults with unique problems by dimension
+
+        Returns:
+            Score object with overall and category scores
+        """
+        from .issue_processor import ProcessedResults, UniqueProblem
+
+        # Calculate category scores based on unique problems
+        category_scores: Dict[str, CategoryScore] = {}
+
+        for category, weight in self.weights.items():
+            problems = processed_results.problems_by_dimension.get(category, [])
+            category_score = self._calculate_category_score_from_problems(
+                category, problems, weight
+            )
+            category_scores[category] = category_score
+
+        # Calculate overall score (weighted average)
+        if category_scores:
+            overall_score = sum(
+                cs.score * cs.weight for cs in category_scores.values()
+            )
+        else:
+            overall_score = 100.0
+
+        # Count totals - use unique problem counts for scoring
+        total_unique_problems = processed_results.total_unique_problems
+        blocking_problems = sum(
+            cs.critical_count + cs.high_count for cs in category_scores.values()
+        )
+
+        # Determine production readiness
+        is_ready = self._is_production_ready(
+            overall_score, category_scores, blocking_problems
+        )
+
+        return Score(
+            overall_score=overall_score,
+            category_scores=category_scores,
+            total_issues=total_unique_problems,  # Now represents unique problems
+            blocking_issues=blocking_problems,
+            is_production_ready=is_ready,
+            readiness_threshold=self.readiness_threshold,
+            metadata={
+                "weights": self.weights,
+                "scoring_method": "unique_problems",
+                "total_issue_instances": processed_results.total_issues,
+                "total_unique_problems": total_unique_problems,
+            },
+        )
+
+    def _calculate_category_score_from_problems(
+        self,
+        category: str,
+        problems: List["UniqueProblem"],
+        weight: float,
+    ) -> CategoryScore:
+        """Calculate score for a category based on unique problems.
+
+        Args:
+            category: Category name
+            problems: List of unique problems in this category
+            weight: Weight of this category
+
+        Returns:
+            CategoryScore for the category
+        """
+        from .issue_processor import UniqueProblem
+
+        # Count unique problems by severity
+        critical_count = len([p for p in problems if p.final_severity == Severity.CRITICAL])
+        high_count = len([p for p in problems if p.final_severity == Severity.HIGH])
+        medium_count = len([p for p in problems if p.final_severity == Severity.MEDIUM])
+        low_count = len([p for p in problems if p.final_severity == Severity.LOW])
+        info_count = len([p for p in problems if p.final_severity == Severity.INFO])
+
+        # Calculate penalty based on unique problems (not instances)
+        penalty = (
+            critical_count * self.SEVERITY_PENALTIES[Severity.CRITICAL]
+            + high_count * self.SEVERITY_PENALTIES[Severity.HIGH]
+            + medium_count * self.SEVERITY_PENALTIES[Severity.MEDIUM]
+            + low_count * self.SEVERITY_PENALTIES[Severity.LOW]
+            + info_count * self.SEVERITY_PENALTIES[Severity.INFO]
+        )
+
+        # Score is 100 minus penalties, minimum 0
+        score = max(0.0, 100.0 - penalty)
+
+        # Calculate total occurrences for metadata
+        total_occurrences = sum(p.occurrence_count for p in problems)
+
+        return CategoryScore(
+            category=category,
+            score=score,
+            issues_count=len(problems),  # Unique problem count
+            critical_count=critical_count,
+            high_count=high_count,
+            medium_count=medium_count,
+            low_count=low_count,
+            info_count=info_count,
+            weight=weight,
+            details={
+                "penalty_applied": penalty,
+                "unique_problems_analyzed": len(problems),
+                "total_occurrences": total_occurrences,
+                "scoring_method": "unique_problems",
+            },
+        )

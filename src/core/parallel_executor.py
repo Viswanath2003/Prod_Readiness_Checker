@@ -3,7 +3,7 @@
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type
 
 from .scanner import BaseScanner, ScanResult
 
@@ -76,13 +76,16 @@ class ParallelExecutor:
         self.scanners.extend(scanners)
         return self
 
-    async def execute(self, target_path: str, progress_callback=None) -> ExecutionResult:
+    async def execute(
+        self,
+        target_path: str,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    ) -> ExecutionResult:
         """Execute all scanners in parallel.
 
         Args:
             target_path: Path to scan
-            progress_callback: Optional callback function called with (completed_count, total_count, scanner_name)
-                              when each scanner completes
+            progress_callback: Optional callback(completed, total, scanner_name) for progress updates
 
         Returns:
             ExecutionResult with all scan results
@@ -130,13 +133,13 @@ class ParallelExecutor:
                 except Exception as e:
                     result.errors[scanner.name] = str(e)
                     result.failed_scans += 1
-                
+
                 finally:
                     # Update progress after scanner completes (success or failure)
                     completed_count += 1
                     if progress_callback:
                         progress_callback(completed_count, total_scanners, scanner.name)
-                
+
                 return scan_result
 
         # Run all scanners concurrently

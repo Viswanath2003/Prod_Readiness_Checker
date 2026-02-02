@@ -112,6 +112,32 @@ class JSONReporter(BaseReporter):
         if report_data.ai_insights:
             report["ai_insights"] = report_data.ai_insights.to_dict()
 
+        # Add processed results (unique problems grouped by dimension)
+        if report_data.processed_results:
+            report["processed_results"] = {
+                "total_issues": report_data.processed_results.total_issues,
+                "total_unique_problems": report_data.processed_results.total_unique_problems,
+                "dimension_summary": report_data.processed_results.dimension_summary,
+                "problems_by_dimension": {
+                    dimension: [
+                        {
+                            "problem_key": p.problem_key,
+                            "title": p.title,
+                            "description": p.description,
+                            "final_severity": p.final_severity.value,
+                            "occurrence_count": p.occurrence_count,
+                            "affected_files": p.affected_files,
+                            "explanation": p.explanation,
+                            "recommendation": p.recommendation,
+                            "rule_ids": p.rule_ids,
+                            "scanners": p.scanners,
+                        }
+                        for p in problems
+                    ]
+                    for dimension, problems in report_data.processed_results.problems_by_dimension.items()
+                },
+            }
+
         # Add metadata if requested
         if self.include_metadata:
             report["metadata"] = report_data.metadata

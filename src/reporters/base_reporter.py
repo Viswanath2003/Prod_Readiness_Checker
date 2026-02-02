@@ -4,11 +4,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..core.scanner import ScanResult
 from ..core.scorer import Score
 from ..api.ai_insights import ReportInsights
+
+if TYPE_CHECKING:
+    from ..core.issue_processor import ProcessedResults
 
 
 @dataclass
@@ -19,6 +22,7 @@ class ReportData:
     scan_results: List[ScanResult]
     score: Score
     ai_insights: Optional[ReportInsights] = None
+    processed_results: Optional["ProcessedResults"] = None  # Grouped problems
     generated_at: datetime = field(default_factory=datetime.now)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -30,6 +34,7 @@ class ReportData:
             "scan_results": [r.to_dict() for r in self.scan_results],
             "score": self.score.to_dict(),
             "ai_insights": self.ai_insights.to_dict() if self.ai_insights else None,
+            "processed_results": self.processed_results.to_dict() if self.processed_results else None,
             "generated_at": self.generated_at.isoformat(),
             "metadata": self.metadata,
         }
