@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from typing import TYPE_CHECKING
 from .base_reporter import BaseReporter, ReportData
 from .json_reporter import JSONReporter
 from .html_reporter import HTMLReporter
@@ -12,6 +13,9 @@ from .pdf_reporter import PDFReporter
 from ..core.scanner import ScanResult
 from ..core.scorer import Score
 from ..api.ai_insights import AIInsightsGenerator, ReportInsights
+
+if TYPE_CHECKING:
+    from ..core.issue_processor import ProcessedResults
 
 
 class ReportGenerator:
@@ -74,6 +78,7 @@ class ReportGenerator:
         formats: Optional[List[str]] = None,
         include_ai: bool = True,
         metadata: Optional[Dict[str, Any]] = None,
+        processed_results: Optional["ProcessedResults"] = None,
     ) -> Dict[str, str]:
         """Generate reports in multiple formats.
 
@@ -85,6 +90,7 @@ class ReportGenerator:
             formats: List of formats to generate (default: all available)
             include_ai: Include AI insights (if enabled)
             metadata: Additional metadata for the report
+            processed_results: Processed and grouped issues (optional)
 
         Returns:
             Dictionary mapping format to report path
@@ -116,6 +122,7 @@ class ReportGenerator:
             scan_results=scan_results,
             score=score,
             ai_insights=ai_insights,
+            processed_results=processed_results,
             generated_at=datetime.now(),
             metadata=metadata or {},
         )

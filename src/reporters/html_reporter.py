@@ -1,8 +1,11 @@
 """HTML Reporter Module - Generate HTML format reports."""
 
-from typing import Optional
+from typing import Optional, List, Dict, Any, TYPE_CHECKING
 
 from .base_reporter import BaseReporter, ReportData
+
+if TYPE_CHECKING:
+    from ..core.issue_processor import ProcessedResults, UniqueProblem
 
 
 class HTMLReporter(BaseReporter):
@@ -76,6 +79,11 @@ class HTMLReporter(BaseReporter):
         ai_section = ""
         if report_data.ai_insights:
             ai_section = self._build_ai_insights_section(report_data.ai_insights)
+
+        # Build grouped problems section (new)
+        grouped_problems_section = ""
+        if report_data.processed_results:
+            grouped_problems_section = self._build_grouped_problems_section(report_data.processed_results)
 
         # Determine status class
         if report_data.score.is_production_ready:
@@ -173,6 +181,8 @@ class HTMLReporter(BaseReporter):
         </section>
 
         {ai_section}
+
+        {grouped_problems_section}
 
         <section class="issues-section">
             <h2>Detailed Issues ({report_data.total_issues} total)</h2>
@@ -298,6 +308,106 @@ class HTMLReporter(BaseReporter):
                 <p>{ai_insights.risk_overview}</p>
             </div>
         </section>"""
+
+    def _build_grouped_problems_section(self, processed_results: "ProcessedResults") -> str:
+        """Build the grouped problems section organized by dimension."""
+        if not processed_results or not processed_results.unique_problems:
+            return ""
+
+        dimension_icons = {
+            "security": "🔒",
+            "performance": "⚡",
+            "reliability": "🛡️",
+            "monitoring": "📊",
+        }
+
+        dimension_colors = {
+            "security": "#dc2626",
+            "performance": "#f59e0b",
+            "reliability": "#2563eb",
+            "monitoring": "#8b5cf6",
+        }
+
+        dimensions_html = []
+
+        for dimension in ["security", "performance", "reliability", "monitoring"]:
+            problems = processed_results.problems_by_dimension.get(dimension, [])
+            if not problems:
+                continue
+
+            icon = dimension_icons.get(dimension, "📋")
+            color = dimension_colors.get(dimension, "#6b7280")
+            summary = processed_results.dimension_summary.get(dimension, {})
+
+            # Build problems list for this dimension
+            problems_html = []
+            for problem in problems:
+                files_preview = ", ".join(problem.affected_files[:3])
+                if len(problem.affected_files) > 3:
+                    files_preview += f" (+{len(problem.affected_files) - 3} more)"
+
+                explanation_html = ""
+                if problem.explanation:
+                    explanation_html = f'<div class="problem-explanation">{problem.explanation}</div>'
+
+                recommendation_html = ""
+                if problem.recommendation:
+                    recommendation_html = f'<div class="problem-recommendation"><strong>Recommendation:</strong> {problem.recommendation}</div>'
+
+                problems_html.append(f"""
+                <div class="problem-card severity-{problem.final_severity.value}">
+                    <div class="problem-header">
+                        <span class="severity-badge {problem.final_severity.value}">{problem.final_severity.value.upper()}</span>
+                        <span class="problem-title">{problem.title}</span>
+                        <span class="occurrence-badge">{problem.occurrence_count} occurrence{'s' if problem.occurrence_count > 1 else ''}</span>
+                    </div>
+                    <div class="problem-body">
+                        <div class="problem-key"><code>{problem.problem_key}</code></div>
+                        <div class="problem-description">{problem.description[:300]}{'...' if len(problem.description) > 300 else ''}</div>
+                        {explanation_html}
+                        {recommendation_html}
+                        <div class="problem-files">
+                            <strong>Affected files:</strong> {files_preview}
+                        </div>
+                        <div class="problem-meta">
+                            <span>Scanners: {', '.join(problem.scanners) if problem.scanners else 'N/A'}</span>
+                            <span>Rules: {', '.join(problem.rule_ids[:3]) if problem.rule_ids else 'N/A'}</span>
+                        </div>
+                    </div>
+                </div>
+                """)
+
+            severity_counts = summary.get("severity_counts", {})
+            dimensions_html.append(f"""
+            <div class="dimension-group" style="border-left: 4px solid {color};">
+                <div class="dimension-header">
+                    <span class="dimension-icon">{icon}</span>
+                    <span class="dimension-name">{dimension.title()}</span>
+                    <span class="dimension-stats">
+                        {summary.get('unique_problem_count', 0)} unique problems |
+                        {summary.get('total_occurrences', 0)} total occurrences
+                    </span>
+                    <span class="dimension-severity-summary">
+                        {f'<span class="critical">{severity_counts.get("critical", 0)} Critical</span>' if severity_counts.get("critical", 0) > 0 else ''}
+                        {f'<span class="high">{severity_counts.get("high", 0)} High</span>' if severity_counts.get("high", 0) > 0 else ''}
+                        {f'<span class="medium">{severity_counts.get("medium", 0)} Medium</span>' if severity_counts.get("medium", 0) > 0 else ''}
+                    </span>
+                </div>
+                <div class="dimension-problems">
+                    {''.join(problems_html)}
+                </div>
+            </div>
+            """)
+
+        return f"""
+        <section class="grouped-problems-section">
+            <h2>Issues by Dimension ({processed_results.total_unique_problems} unique problems from {processed_results.total_issues} instances)</h2>
+            <p class="section-description">
+                Issues are grouped by type. Multiple occurrences of the same problem are consolidated into a single entry.
+            </p>
+            {''.join(dimensions_html)}
+        </section>
+        """
 
     def _get_styles(self) -> str:
         """Get embedded CSS styles."""
@@ -550,6 +660,152 @@ class HTMLReporter(BaseReporter):
 
         .critical-count { color: var(--critical-color); font-weight: 600; }
         .high-count { color: var(--high-color); font-weight: 600; }
+
+        /* Grouped Problems Section Styles */
+        .grouped-problems-section {
+            background: var(--card-bg);
+        }
+
+        .section-description {
+            color: var(--info-color);
+            font-size: 0.9rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .dimension-group {
+            background: var(--bg-color);
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+        }
+
+        .dimension-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .dimension-icon {
+            font-size: 1.5rem;
+        }
+
+        .dimension-name {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        .dimension-stats {
+            color: var(--info-color);
+            font-size: 0.875rem;
+        }
+
+        .dimension-severity-summary {
+            margin-left: auto;
+            display: flex;
+            gap: 0.75rem;
+            font-size: 0.75rem;
+        }
+
+        .dimension-severity-summary .critical { color: var(--critical-color); font-weight: 600; }
+        .dimension-severity-summary .high { color: var(--high-color); font-weight: 600; }
+        .dimension-severity-summary .medium { color: var(--medium-color); font-weight: 600; }
+
+        .dimension-problems {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .problem-card {
+            background: var(--card-bg);
+            border-radius: 6px;
+            padding: 1rem;
+            border-left: 3px solid var(--info-color);
+        }
+
+        .problem-card.severity-critical { border-left-color: var(--critical-color); }
+        .problem-card.severity-high { border-left-color: var(--high-color); }
+        .problem-card.severity-medium { border-left-color: var(--medium-color); }
+        .problem-card.severity-low { border-left-color: var(--low-color); }
+        .problem-card.severity-info { border-left-color: var(--info-color); }
+
+        .problem-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .problem-title {
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        .occurrence-badge {
+            background: var(--bg-color);
+            padding: 0.2rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            color: var(--info-color);
+        }
+
+        .problem-body {
+            font-size: 0.9rem;
+        }
+
+        .problem-key {
+            margin-bottom: 0.5rem;
+        }
+
+        .problem-key code {
+            background: var(--bg-color);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            color: var(--primary-color);
+        }
+
+        .problem-description {
+            color: var(--text-color);
+            margin-bottom: 0.75rem;
+            line-height: 1.5;
+        }
+
+        .problem-explanation {
+            background: #f0f9ff;
+            padding: 0.75rem;
+            border-radius: 4px;
+            margin-bottom: 0.75rem;
+            font-size: 0.85rem;
+            color: #1e40af;
+        }
+
+        .problem-recommendation {
+            background: #f0fdf4;
+            padding: 0.75rem;
+            border-radius: 4px;
+            margin-bottom: 0.75rem;
+            font-size: 0.85rem;
+            color: #166534;
+        }
+
+        .problem-files {
+            font-size: 0.8rem;
+            color: var(--info-color);
+            margin-bottom: 0.5rem;
+            font-family: monospace;
+        }
+
+        .problem-meta {
+            display: flex;
+            gap: 1.5rem;
+            font-size: 0.75rem;
+            color: var(--info-color);
+        }
 
         .ai-insights-section {
             background: linear-gradient(135deg, #f0f9ff, #e0f2fe);
