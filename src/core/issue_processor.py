@@ -116,99 +116,14 @@ class ProcessedResults:
 
 
 class IssueProcessor:
-    """Process raw scanner issues into normalized, classified, and grouped problems."""
+    """Process raw scanner issues into normalized, classified, and grouped problems.
 
-    # Known problem key mappings (rule-based, no AI needed for common cases)
-    KNOWN_PROBLEM_KEYS = {
-        # Security
-        "CKV_K8S_1": "privileged_container",
-        "CKV_K8S_8": "liveness_probe_missing",
-        "CKV_K8S_9": "readiness_probe_missing",
-        "CKV_K8S_10": "cpu_limits_missing",
-        "CKV_K8S_11": "cpu_requests_missing",
-        "CKV_K8S_12": "memory_limits_missing",
-        "CKV_K8S_13": "memory_requests_missing",
-        "CKV_K8S_14": "image_tag_latest",
-        "CKV_K8S_20": "container_runs_as_root",
-        "CKV_K8S_21": "default_namespace_used",
-        "CKV_K8S_22": "read_only_filesystem_missing",
-        "CKV_K8S_23": "host_pid_namespace",
-        "CKV_K8S_25": "allow_privilege_escalation",
-        "CKV_K8S_28": "capabilities_not_dropped",
-        "CKV_K8S_29": "security_context_missing",
-        "CKV_K8S_30": "seccomp_profile_missing",
-        "CKV_K8S_31": "host_network_namespace",
-        "CKV_K8S_35": "secret_in_env_var",
-        "CKV_K8S_37": "capability_sys_admin",
-        "CKV_K8S_38": "service_account_token_automount",
-        "CKV_K8S_40": "pod_service_account_missing",
-        "CKV_K8S_43": "image_pull_policy_not_always",
-        "CKV_DOCKER_1": "root_user_dockerfile",
-        "CKV_DOCKER_2": "healthcheck_missing_dockerfile",
-        "CKV_DOCKER_3": "add_instruction_used",
-        "CKV_DOCKER_7": "latest_tag_dockerfile",
-        "CKV2_DOCKER_1": "multi_stage_build_missing",
-        # Performance
-        "PERF-NO-CPU-LIMIT": "cpu_limits_missing",
-        "PERF-NO-MEMORY-LIMIT": "memory_limits_missing",
-        "PERF-SINGLE-REPLICA": "single_replica_deployment",
-        "PERF-NO-HPA": "autoscaling_not_configured",
-        "PERF-NO-RATE-LIMIT": "rate_limiting_missing",
-        "PERF-NO-HTTP-TIMEOUT": "http_timeout_missing",
-        "PERF-NO-CONNECTION-POOL": "connection_pool_missing",
-        "PERF-NO-CACHE": "caching_not_configured",
-        # Reliability
-        "REL-NO-LIVENESS": "liveness_probe_missing",
-        "REL-NO-READINESS": "readiness_probe_missing",
-        "REL-LOW-REPLICAS": "low_replica_count",
-        "REL-NO-PDB": "pod_disruption_budget_missing",
-        "REL-NO-RESTART-POLICY": "restart_policy_missing",
-        "REL-NO-RESOURCE-LIMITS": "resource_limits_missing",
-        "REL-NO-CIRCUIT-BREAKER": "circuit_breaker_missing",
-        "REL-NO-RETRY": "retry_config_missing",
-        "REL-NO-BACKUP": "backup_not_configured",
-        # Monitoring
-        "MON-NO-LOGGING": "logging_not_configured",
-        "MON-NO-METRICS": "metrics_not_configured",
-        "MON-NO-TRACING": "tracing_not_configured",
-        "MON-NO-ALERTS": "alerting_not_configured",
-    }
+    Uses AI-based classification for:
+    - Dimension mapping (security, performance, reliability, monitoring)
+    - Problem key generation (canonical identifiers)
 
-    # Known dimension mappings based on rule prefixes and keywords
-    DIMENSION_KEYWORDS = {
-        DIMENSION_SECURITY: [
-            "secret", "credential", "password", "token", "key", "auth", "privileged",
-            "root", "permission", "vulnerability", "cve", "injection", "xss", "csrf",
-            "encryption", "tls", "ssl", "certificate", "seccomp", "capability",
-            "escalation", "namespace", "network_policy", "rbac", "service_account"
-        ],
-        DIMENSION_PERFORMANCE: [
-            "cpu", "memory", "resource", "limit", "request", "replica", "scale",
-            "autoscal", "hpa", "timeout", "latency", "cache", "pool", "connection",
-            "rate_limit", "throttl", "buffer", "queue", "worker", "thread"
-        ],
-        DIMENSION_RELIABILITY: [
-            "liveness", "readiness", "health", "probe", "restart", "availability",
-            "redundan", "replica", "pdb", "disruption", "failover", "backup",
-            "recovery", "circuit_breaker", "retry", "fallback", "graceful"
-        ],
-        DIMENSION_MONITORING: [
-            "log", "metric", "monitor", "trace", "observ", "alert", "dashboard",
-            "prometheus", "grafana", "jaeger", "fluentd", "elk", "apm"
-        ],
-    }
-
-    # Rule prefix to dimension mapping
-    RULE_PREFIX_DIMENSION = {
-        "CKV_": DIMENSION_SECURITY,
-        "CKV2_": DIMENSION_SECURITY,
-        "PERF-": DIMENSION_PERFORMANCE,
-        "REL-": DIMENSION_RELIABILITY,
-        "MON-": DIMENSION_MONITORING,
-        "SEC-": DIMENSION_SECURITY,
-        "CVE-": DIMENSION_SECURITY,
-        "GHSA-": DIMENSION_SECURITY,
-    }
+    No hardcoded mappings - all classification is done by AI.
+    """
 
     def __init__(
         self,
@@ -222,7 +137,7 @@ class IssueProcessor:
         Args:
             api_key: API key for AI provider (optional, uses env var if not provided)
             model: Model to use for AI classification (optional, uses provider default)
-            use_ai_classification: Whether to use AI for unknown issues
+            use_ai_classification: Whether to use AI for classification
             provider: AI provider to use (openai, gemini, grok, anthropic, ollama)
         """
         self.use_ai_classification = use_ai_classification
@@ -268,13 +183,13 @@ class IssueProcessor:
                 dimension_summary={dim: {"count": 0, "severity_counts": {}} for dim in ALL_DIMENSIONS},
             )
 
-        # Step 2: Normalize all issues
+        # Step 2: Normalize all issues (with placeholder dimension/key)
         normalized_issues = await self._normalize_issues(all_issues)
 
-        # Step 3: Classify dimensions for issues that need it
+        # Step 3: AI-based dimension classification for ALL issues
         normalized_issues = await self._classify_dimensions(normalized_issues)
 
-        # Step 4: Generate problem keys for issues that need it
+        # Step 4: AI-based problem key generation for ALL issues
         normalized_issues = await self._generate_problem_keys(normalized_issues)
 
         # Step 5: Group by problem key
@@ -315,11 +230,11 @@ class IssueProcessor:
             # Clean and normalize description
             normalized_description = self._normalize_text(issue.description)
 
-            # Get initial dimension (may be refined later)
-            dimension = self._get_initial_dimension(issue)
+            # Placeholder dimension - will be set by AI
+            dimension = "unknown"
 
-            # Get initial problem key (may be refined later)
-            problem_key = self._get_initial_problem_key(issue)
+            # Placeholder problem key - will be set by AI
+            problem_key = self._generate_key_from_title(issue.title)
 
             normalized.append(NormalizedIssue(
                 original_issue=issue,
@@ -343,66 +258,8 @@ class IssueProcessor:
         text = re.sub(r'\s+', ' ', text).strip()
         return text
 
-    def _get_initial_dimension(self, issue: Issue) -> str:
-        """Get initial dimension based on rule-based classification.
-
-        Args:
-            issue: The issue to classify
-
-        Returns:
-            Dimension string
-        """
-        # Check by rule ID prefix
-        if issue.rule_id:
-            for prefix, dimension in self.RULE_PREFIX_DIMENSION.items():
-                if issue.rule_id.startswith(prefix):
-                    return dimension
-
-        # Check by issue category
-        category_mapping = {
-            IssueCategory.SECURITY: DIMENSION_SECURITY,
-            IssueCategory.PERFORMANCE: DIMENSION_PERFORMANCE,
-            IssueCategory.RELIABILITY: DIMENSION_RELIABILITY,
-            IssueCategory.MONITORING: DIMENSION_MONITORING,
-        }
-        if issue.category in category_mapping:
-            return category_mapping[issue.category]
-
-        # Check by keywords in title and description
-        text = f"{issue.title} {issue.description}".lower()
-        dimension_scores = {dim: 0 for dim in ALL_DIMENSIONS}
-
-        for dimension, keywords in self.DIMENSION_KEYWORDS.items():
-            for keyword in keywords:
-                if keyword in text:
-                    dimension_scores[dimension] += 1
-
-        # Return dimension with highest score, default to security
-        max_dimension = max(dimension_scores, key=dimension_scores.get)
-        if dimension_scores[max_dimension] > 0:
-            return max_dimension
-
-        # Default to security if no match
-        return DIMENSION_SECURITY
-
-    def _get_initial_problem_key(self, issue: Issue) -> str:
-        """Get initial problem key based on rule-based mapping.
-
-        Args:
-            issue: The issue to map
-
-        Returns:
-            Problem key string
-        """
-        # Check known mappings
-        if issue.rule_id and issue.rule_id in self.KNOWN_PROBLEM_KEYS:
-            return self.KNOWN_PROBLEM_KEYS[issue.rule_id]
-
-        # Generate key from title if not known
-        return self._generate_key_from_title(issue.title)
-
     def _generate_key_from_title(self, title: str) -> str:
-        """Generate a problem key from issue title.
+        """Generate a fallback problem key from issue title.
 
         Args:
             title: Issue title
@@ -429,44 +286,46 @@ class IssueProcessor:
         self,
         normalized_issues: List[NormalizedIssue],
     ) -> List[NormalizedIssue]:
-        """Classify dimensions for issues using AI if needed.
+        """Classify dimensions for ALL issues using AI.
 
         Args:
             normalized_issues: List of normalized issues
 
         Returns:
-            Issues with refined dimension classification
+            Issues with AI-classified dimensions
         """
         if not self.use_ai_classification or not self.is_ai_available():
+            # Fallback: use scanner category if available
+            for issue in normalized_issues:
+                issue.dimension = self._fallback_dimension(issue)
             return normalized_issues
 
-        # Find issues that might need AI classification
-        # (those classified by fallback keyword matching with low confidence)
-        issues_needing_classification = []
-        for issue in normalized_issues:
-            # If dimension was set from rule prefix, it's reliable
-            if issue.rule_id:
-                for prefix in self.RULE_PREFIX_DIMENSION:
-                    if issue.rule_id.startswith(prefix):
-                        break
-                else:
-                    issues_needing_classification.append(issue)
-            else:
-                issues_needing_classification.append(issue)
-
-        if not issues_needing_classification:
-            return normalized_issues
-
-        # Batch classify with AI
+        # ALL issues go through AI classification
         try:
-            classifications = await self._batch_classify_dimensions(issues_needing_classification)
-            for issue, dimension in zip(issues_needing_classification, classifications):
+            classifications = await self._batch_classify_dimensions(normalized_issues)
+            for issue, dimension in zip(normalized_issues, classifications):
                 if dimension in ALL_DIMENSIONS:
                     issue.dimension = dimension
+                else:
+                    issue.dimension = self._fallback_dimension(issue)
         except Exception as e:
-            print(f"AI dimension classification failed, using rule-based: {e}")
+            print(f"AI dimension classification failed, using fallback: {e}")
+            for issue in normalized_issues:
+                issue.dimension = self._fallback_dimension(issue)
 
         return normalized_issues
+
+    def _fallback_dimension(self, issue: NormalizedIssue) -> str:
+        """Fallback dimension based on scanner category when AI unavailable."""
+        category_mapping = {
+            IssueCategory.SECURITY: DIMENSION_SECURITY,
+            IssueCategory.PERFORMANCE: DIMENSION_PERFORMANCE,
+            IssueCategory.RELIABILITY: DIMENSION_RELIABILITY,
+            IssueCategory.MONITORING: DIMENSION_MONITORING,
+        }
+        if issue.original_issue.category in category_mapping:
+            return category_mapping[issue.original_issue.category]
+        return DIMENSION_SECURITY  # Default fallback
 
     async def _batch_classify_dimensions(
         self,
@@ -485,11 +344,11 @@ class IssueProcessor:
 
         # Process in smaller batches to avoid timeouts (max 10 at a time)
         BATCH_SIZE = 10
-        all_dimensions = [issue.dimension for issue in issues]  # Default to existing
+        all_dimensions = [self._fallback_dimension(issue) for issue in issues]
 
         for batch_start in range(0, len(issues), BATCH_SIZE):
             batch_issues = issues[batch_start:batch_start + BATCH_SIZE]
-            batch_dimensions = await self._classify_single_batch(batch_issues, batch_start)
+            batch_dimensions = await self._classify_single_batch(batch_issues)
 
             # Update dimensions for this batch
             for i, dim in enumerate(batch_dimensions):
@@ -501,37 +360,40 @@ class IssueProcessor:
     async def _classify_single_batch(
         self,
         issues: List[NormalizedIssue],
-        start_index: int = 0,
     ) -> List[str]:
-        """Classify a single batch of issues."""
-        # Prepare batch prompt with minimal context
+        """Classify a single batch of issues using AI."""
+        # Prepare batch prompt with title context
         issues_data = []
         for i, issue in enumerate(issues):
             issues_data.append({
                 "index": i,
-                "title": issue.normalized_title[:80],
-                "rule_id": issue.rule_id or "",
+                "title": issue.normalized_title[:100],
             })
 
-        prompt = f"""Classify each issue into ONE dimension: security, performance, reliability, or monitoring.
+        prompt = f"""Classify each infrastructure/DevOps issue into exactly ONE dimension based on its title:
 
-Issues:
+- security: vulnerabilities, secrets, credentials, permissions, authentication, encryption, access control, privileged access, root user, capabilities
+- performance: CPU limits, memory limits, resource requests, scaling, replicas, HPA, timeouts, caching, connection pools, rate limiting
+- reliability: health checks, liveness probes, readiness probes, availability, redundancy, PDB, restart policies, circuit breakers, backups
+- monitoring: logging, metrics, tracing, alerting, observability, dashboards
+
+Issues to classify:
 {json.dumps(issues_data)}
 
-Respond with JSON array: [{{"index": 0, "dimension": "security"}}]"""
+Respond with JSON array only: [{{"index": 0, "dimension": "security"}}]"""
 
         try:
             response = await asyncio.wait_for(
                 self.ai_provider.complete(
                     messages=[
-                        {"role": "system", "content": "Classify infrastructure issues. Respond with valid JSON array only."},
+                        {"role": "system", "content": "You are a DevOps expert. Classify each issue into exactly one dimension based on what the issue is about. Respond with valid JSON array only."},
                         {"role": "user", "content": prompt},
                     ],
                     max_tokens=500,
                     temperature=0.1,
                     json_mode=True,
                 ),
-                timeout=30.0  # 30 second timeout
+                timeout=30.0
             )
 
             # Track token usage safely
@@ -548,14 +410,11 @@ Respond with JSON array: [{{"index": 0, "dimension": "security"}}]"""
 
             results = json.loads(content)
 
-            # Handle case where results is not a list
             if not isinstance(results, list):
-                return [issue.dimension for issue in issues]
+                return [self._fallback_dimension(issue) for issue in issues]
 
-            # Build result list maintaining order
-            dimensions = [issue.dimension for issue in issues]
+            dimensions = [self._fallback_dimension(issue) for issue in issues]
             for item in results:
-                # Skip non-dict items
                 if not isinstance(item, dict):
                     continue
                 idx = item.get("index")
@@ -566,42 +425,31 @@ Respond with JSON array: [{{"index": 0, "dimension": "security"}}]"""
             return dimensions
 
         except asyncio.TimeoutError:
-            print(f"Dimension classification timeout, using rule-based")
-            return [issue.dimension for issue in issues]
+            print("Dimension classification timeout, using fallback")
+            return [self._fallback_dimension(issue) for issue in issues]
         except Exception as e:
             print(f"Batch dimension classification error: {e}")
-            return [issue.dimension for issue in issues]
+            return [self._fallback_dimension(issue) for issue in issues]
 
     async def _generate_problem_keys(
         self,
         normalized_issues: List[NormalizedIssue],
     ) -> List[NormalizedIssue]:
-        """Generate canonical problem keys for issues.
+        """Generate canonical problem keys for ALL issues using AI.
 
         Args:
             normalized_issues: List of normalized issues
 
         Returns:
-            Issues with refined problem keys
+            Issues with AI-generated problem keys
         """
         if not self.use_ai_classification or not self.is_ai_available():
             return normalized_issues
 
-        # Find issues with auto-generated keys that might need refinement
-        issues_needing_keys = []
-        for issue in normalized_issues:
-            # If key came from known mapping, it's reliable
-            if issue.rule_id in self.KNOWN_PROBLEM_KEYS:
-                continue
-            issues_needing_keys.append(issue)
-
-        if not issues_needing_keys:
-            return normalized_issues
-
-        # Batch generate keys with AI
+        # ALL issues go through AI key generation
         try:
-            keys = await self._batch_generate_problem_keys(issues_needing_keys)
-            for issue, key in zip(issues_needing_keys, keys):
+            keys = await self._batch_generate_problem_keys(normalized_issues)
+            for issue, key in zip(normalized_issues, keys):
                 if key:
                     issue.problem_key = key
         except Exception as e:
@@ -624,15 +472,14 @@ Respond with JSON array: [{{"index": 0, "dimension": "security"}}]"""
         if not issues:
             return []
 
-        # Process in smaller batches to avoid timeouts (max 10 at a time)
+        # Process in smaller batches
         BATCH_SIZE = 10
-        all_keys = [issue.problem_key for issue in issues]  # Default to existing
+        all_keys = [issue.problem_key for issue in issues]
 
         for batch_start in range(0, len(issues), BATCH_SIZE):
             batch_issues = issues[batch_start:batch_start + BATCH_SIZE]
             batch_keys = await self._generate_keys_single_batch(batch_issues)
 
-            # Update keys for this batch
             for i, key in enumerate(batch_keys):
                 if key:
                     all_keys[batch_start + i] = key
@@ -643,39 +490,40 @@ Respond with JSON array: [{{"index": 0, "dimension": "security"}}]"""
         self,
         issues: List[NormalizedIssue],
     ) -> List[str]:
-        """Generate problem keys for a single batch of issues."""
-        # Prepare batch prompt with minimal context
+        """Generate problem keys for a single batch of issues using AI."""
         issues_data = []
         for i, issue in enumerate(issues):
             issues_data.append({
                 "index": i,
-                "title": issue.normalized_title[:80],
+                "title": issue.normalized_title[:100],
             })
 
-        prompt = f"""Generate a canonical problem key for each issue (snake_case, 2-4 words).
+        prompt = f"""Generate a canonical problem key for each issue. The key should:
+- Be snake_case (lowercase with underscores)
+- Be 2-4 words describing the core problem
+- Group similar issues (e.g., all "missing CPU limit" issues should get same key)
 
 Issues:
 {json.dumps(issues_data)}
 
-Example: cpu_limits_missing, liveness_probe_missing
+Examples: cpu_limits_missing, liveness_probe_missing, container_runs_as_root, single_replica_deployment
 
-Respond with JSON array: [{{"index": 0, "problem_key": "example_key"}}]"""
+Respond with JSON array only: [{{"index": 0, "problem_key": "example_key"}}]"""
 
         try:
             response = await asyncio.wait_for(
                 self.ai_provider.complete(
                     messages=[
-                        {"role": "system", "content": "Generate canonical problem identifiers. Respond with valid JSON array only."},
+                        {"role": "system", "content": "Generate canonical problem identifiers that group similar issues. Respond with valid JSON array only."},
                         {"role": "user", "content": prompt},
                     ],
                     max_tokens=500,
                     temperature=0.1,
                     json_mode=True,
                 ),
-                timeout=30.0  # 30 second timeout
+                timeout=30.0
             )
 
-            # Track token usage safely
             tracker = GlobalTokenTracker.get_tracker()
             if tracker and response.usage:
                 prompt_tokens = response.usage.get('prompt_tokens', 0) if isinstance(response.usage, dict) else 0
@@ -689,20 +537,16 @@ Respond with JSON array: [{{"index": 0, "problem_key": "example_key"}}]"""
 
             results = json.loads(content)
 
-            # Handle case where results is not a list
             if not isinstance(results, list):
                 return [issue.problem_key for issue in issues]
 
-            # Build result list maintaining order
             keys = [issue.problem_key for issue in issues]
             for item in results:
-                # Skip non-dict items
                 if not isinstance(item, dict):
                     continue
                 idx = item.get("index")
                 key = item.get("problem_key", "")
                 if idx is not None and isinstance(idx, int) and 0 <= idx < len(issues) and key and isinstance(key, str):
-                    # Normalize the key
                     key = re.sub(r'[^a-z0-9_]', '_', key.lower())
                     key = re.sub(r'_+', '_', key).strip('_')
                     if key:
@@ -711,7 +555,7 @@ Respond with JSON array: [{{"index": 0, "problem_key": "example_key"}}]"""
             return keys
 
         except asyncio.TimeoutError:
-            print(f"Problem key generation timeout, using auto-generated keys")
+            print("Problem key generation timeout, using auto-generated keys")
             return [issue.problem_key for issue in issues]
         except Exception as e:
             print(f"Batch problem key generation error: {e}")
@@ -760,8 +604,8 @@ Respond with JSON array: [{{"index": 0, "problem_key": "example_key"}}]"""
             # Determine final severity (highest among instances)
             final_severity = self._get_highest_severity(issues)
 
-            # Get dimension (should be consistent, take first)
-            dimension = issues[0].dimension
+            # Get dimension (use most common if inconsistent)
+            dimension = self._get_most_common_dimension(issues)
 
             # Get unique affected files
             affected_files = list(set(issue.file_path for issue in issues if issue.file_path != "unknown"))
@@ -802,14 +646,7 @@ Respond with JSON array: [{{"index": 0, "problem_key": "example_key"}}]"""
         return unique_problems
 
     def _get_highest_severity(self, issues: List[NormalizedIssue]) -> Severity:
-        """Get the highest severity from a list of issues.
-
-        Args:
-            issues: List of normalized issues
-
-        Returns:
-            Highest severity level
-        """
+        """Get the highest severity from a list of issues."""
         severity_priority = {
             Severity.CRITICAL: 0,
             Severity.HIGH: 1,
@@ -824,25 +661,29 @@ Respond with JSON array: [{{"index": 0, "problem_key": "example_key"}}]"""
         highest = min(issues, key=lambda i: severity_priority.get(i.severity, 5))
         return highest.severity
 
+    def _get_most_common_dimension(self, issues: List[NormalizedIssue]) -> str:
+        """Get the most common dimension from a list of issues."""
+        if not issues:
+            return DIMENSION_SECURITY
+
+        dimension_counts: Dict[str, int] = {}
+        for issue in issues:
+            dim = issue.dimension
+            dimension_counts[dim] = dimension_counts.get(dim, 0) + 1
+
+        return max(dimension_counts, key=dimension_counts.get)
+
     def _organize_by_dimension(
         self,
         unique_problems: List[UniqueProblem],
     ) -> Dict[str, List[UniqueProblem]]:
-        """Organize unique problems by dimension.
-
-        Args:
-            unique_problems: List of unique problems
-
-        Returns:
-            Dictionary mapping dimension to list of problems
-        """
+        """Organize unique problems by dimension."""
         by_dimension: Dict[str, List[UniqueProblem]] = {dim: [] for dim in ALL_DIMENSIONS}
 
         for problem in unique_problems:
             if problem.dimension in by_dimension:
                 by_dimension[problem.dimension].append(problem)
             else:
-                # Fallback to security if dimension is unknown
                 by_dimension[DIMENSION_SECURITY].append(problem)
 
         return by_dimension
@@ -851,14 +692,7 @@ Respond with JSON array: [{{"index": 0, "problem_key": "example_key"}}]"""
         self,
         problems_by_dimension: Dict[str, List[UniqueProblem]],
     ) -> Dict[str, Dict[str, Any]]:
-        """Generate summary statistics per dimension.
-
-        Args:
-            problems_by_dimension: Problems organized by dimension
-
-        Returns:
-            Summary statistics per dimension
-        """
+        """Generate summary statistics per dimension."""
         summary = {}
 
         for dimension, problems in problems_by_dimension.items():

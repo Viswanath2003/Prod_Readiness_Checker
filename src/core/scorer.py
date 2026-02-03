@@ -1,5 +1,13 @@
-"""Scorer Module - Calculates production readiness scores."""
+"""Scorer Module - Calculates production readiness scores.
 
+Uses diminishing returns formula for scoring:
+deduction = base_severity * log2(1 + unique_count)
+
+This means multiple issues of the same type don't linearly compound.
+Example: 3 MEDIUM issues (base 8) → 8 * log2(4) = 16 (instead of 24)
+"""
+
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -271,13 +279,11 @@ class Scorer:
         low_count = len([i for i in issues if i.severity == Severity.LOW])
         info_count = len([i for i in issues if i.severity == Severity.INFO])
 
-        # Calculate penalty
-        penalty = (
-            critical_count * self.SEVERITY_PENALTIES[Severity.CRITICAL]
-            + high_count * self.SEVERITY_PENALTIES[Severity.HIGH]
-            + medium_count * self.SEVERITY_PENALTIES[Severity.MEDIUM]
-            + low_count * self.SEVERITY_PENALTIES[Severity.LOW]
-            + info_count * self.SEVERITY_PENALTIES[Severity.INFO]
+        # Calculate penalty using diminishing returns formula:
+        # penalty = base_severity * log2(1 + unique_count)
+        # This prevents multiple same-type issues from linearly compounding
+        penalty = self._calculate_diminishing_penalty(
+            critical_count, high_count, medium_count, low_count, info_count
         )
 
         # Score is 100 minus penalties, minimum 0
@@ -294,8 +300,9 @@ class Scorer:
             info_count=info_count,
             weight=weight,
             details={
-                "penalty_applied": penalty,
+                "penalty_applied": round(penalty, 2),
                 "issues_analyzed": len(issues),
+                "scoring_formula": "diminishing_returns",
             },
         )
 
@@ -330,6 +337,49 @@ class Scorer:
             return False
 
         return True
+
+    def _calculate_diminishing_penalty(
+        self,
+        critical_count: int,
+        high_count: int,
+        medium_count: int,
+        low_count: int,
+        info_count: int,
+    ) -> float:
+        """Calculate penalty using diminishing returns formula.
+
+        Formula: penalty = base_severity * log2(1 + unique_count)
+
+        This means:
+        - 1 issue: base * log2(2) = base * 1.0
+        - 2 issues: base * log2(3) = base * 1.58
+        - 3 issues: base * log2(4) = base * 2.0
+        - 10 issues: base * log2(11) = base * 3.46
+
+        Args:
+            critical_count: Number of critical severity issues
+            high_count: Number of high severity issues
+            medium_count: Number of medium severity issues
+            low_count: Number of low severity issues
+            info_count: Number of info severity issues
+
+        Returns:
+            Total penalty with diminishing returns applied
+        """
+        penalty = 0.0
+
+        if critical_count > 0:
+            penalty += self.SEVERITY_PENALTIES[Severity.CRITICAL] * math.log2(1 + critical_count)
+        if high_count > 0:
+            penalty += self.SEVERITY_PENALTIES[Severity.HIGH] * math.log2(1 + high_count)
+        if medium_count > 0:
+            penalty += self.SEVERITY_PENALTIES[Severity.MEDIUM] * math.log2(1 + medium_count)
+        if low_count > 0:
+            penalty += self.SEVERITY_PENALTIES[Severity.LOW] * math.log2(1 + low_count)
+        if info_count > 0:
+            penalty += self.SEVERITY_PENALTIES[Severity.INFO] * math.log2(1 + info_count)
+
+        return penalty
 
     def _map_scan_type_to_category(self, scan_type: str) -> str:
         """Map scan type to category.
@@ -490,13 +540,10 @@ class Scorer:
         low_count = len([p for p in problems if p.final_severity == Severity.LOW])
         info_count = len([p for p in problems if p.final_severity == Severity.INFO])
 
-        # Calculate penalty based on unique problems (not instances)
-        penalty = (
-            critical_count * self.SEVERITY_PENALTIES[Severity.CRITICAL]
-            + high_count * self.SEVERITY_PENALTIES[Severity.HIGH]
-            + medium_count * self.SEVERITY_PENALTIES[Severity.MEDIUM]
-            + low_count * self.SEVERITY_PENALTIES[Severity.LOW]
-            + info_count * self.SEVERITY_PENALTIES[Severity.INFO]
+        # Calculate penalty using diminishing returns formula:
+        # penalty = base_severity * log2(1 + unique_count)
+        penalty = self._calculate_diminishing_penalty(
+            critical_count, high_count, medium_count, low_count, info_count
         )
 
         # Score is 100 minus penalties, minimum 0
@@ -516,9 +563,9 @@ class Scorer:
             info_count=info_count,
             weight=weight,
             details={
-                "penalty_applied": penalty,
+                "penalty_applied": round(penalty, 2),
                 "unique_problems_analyzed": len(problems),
                 "total_occurrences": total_occurrences,
-                "scoring_method": "unique_problems",
+                "scoring_method": "unique_problems_diminishing",
             },
         )
