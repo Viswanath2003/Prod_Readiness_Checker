@@ -1,14 +1,13 @@
 """Issue Processor Module - Normalize, classify, group, and aggregate issues."""
 
 import asyncio
-import hashlib
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .scanner import Issue, IssueCategory, ScanResult, Severity
+from .rule_equivalence import get_canonical_rule_id
 from ..api.ai_provider import (
     AIProvider,
     BaseAIProvider,
@@ -271,22 +270,19 @@ class IssueProcessor:
         # Step 2: Normalize all issues
         normalized_issues = await self._normalize_issues(all_issues)
 
-        # Step 3: Classify dimensions for issues that need it
-        normalized_issues = await self._classify_dimensions(normalized_issues)
-
-        # Step 4: Generate problem keys for issues that need it
-        normalized_issues = await self._generate_problem_keys(normalized_issues)
-
-        # Step 5: Group by problem key
+        # Step 3: Group by problem key
         grouped = self._group_by_problem_key(normalized_issues)
 
-        # Step 6: Aggregate severity and create UniqueProblem objects
+        # Step 4: Aggregate severity and create UniqueProblem objects
         unique_problems = self._aggregate_to_unique_problems(grouped)
 
-        # Step 7: Organize by dimension
+        # Step 5: Optionally classify unique problems with AI
+        unique_problems = await self._classify_unique_problems(unique_problems)
+
+        # Step 6: Organize by dimension
         problems_by_dimension = self._organize_by_dimension(unique_problems)
 
-        # Step 8: Generate dimension summary
+        # Step 7: Generate dimension summary
         dimension_summary = self._generate_dimension_summary(problems_by_dimension)
 
         return ProcessedResults(
@@ -398,8 +394,20 @@ class IssueProcessor:
         if issue.rule_id and issue.rule_id in self.KNOWN_PROBLEM_KEYS:
             return self.KNOWN_PROBLEM_KEYS[issue.rule_id]
 
+        # Use canonical rule ID if available (stable cross-scanner grouping)
+        if issue.rule_id:
+            canonical_rule_id = get_canonical_rule_id(issue.rule_id)
+            if canonical_rule_id:
+                return self._normalize_problem_key(canonical_rule_id)
+
         # Generate key from title if not known
         return self._generate_key_from_title(issue.title)
+
+    def _normalize_problem_key(self, key: str) -> str:
+        """Normalize a problem key to snake_case."""
+        normalized = re.sub(r'[^a-z0-9]+', '_', key.lower())
+        normalized = re.sub(r'_+', '_', normalized).strip('_')
+        return normalized or "unknown_issue"
 
     def _generate_key_from_title(self, title: str) -> str:
         """Generate a problem key from issue title.
@@ -414,10 +422,7 @@ class IssueProcessor:
             return "unknown_issue"
 
         # Convert to lowercase and replace spaces/special chars with underscores
-        key = title.lower()
-        key = re.sub(r'[^a-z0-9]+', '_', key)
-        key = re.sub(r'_+', '_', key)
-        key = key.strip('_')
+        key = self._normalize_problem_key(title)
 
         # Truncate if too long
         if len(key) > 50:
@@ -425,116 +430,78 @@ class IssueProcessor:
 
         return key or "unknown_issue"
 
-    async def _classify_dimensions(
+    async def _classify_unique_problems(
         self,
-        normalized_issues: List[NormalizedIssue],
-    ) -> List[NormalizedIssue]:
-        """Classify dimensions for issues using AI if needed.
-
-        Args:
-            normalized_issues: List of normalized issues
-
-        Returns:
-            Issues with refined dimension classification
-        """
+        unique_problems: List[UniqueProblem],
+    ) -> List[UniqueProblem]:
+        """Classify unique problems with AI (dimension + severity)."""
         if not self.use_ai_classification or not self.is_ai_available():
-            return normalized_issues
+            return unique_problems
 
-        # Find issues that might need AI classification
-        # (those classified by fallback keyword matching with low confidence)
-        issues_needing_classification = []
-        for issue in normalized_issues:
-            # If dimension was set from rule prefix, it's reliable
-            if issue.rule_id:
-                for prefix in self.RULE_PREFIX_DIMENSION:
-                    if issue.rule_id.startswith(prefix):
-                        break
-                else:
-                    issues_needing_classification.append(issue)
-            else:
-                issues_needing_classification.append(issue)
+        if not unique_problems:
+            return unique_problems
 
-        if not issues_needing_classification:
-            return normalized_issues
-
-        # Batch classify with AI
-        try:
-            classifications = await self._batch_classify_dimensions(issues_needing_classification)
-            for issue, dimension in zip(issues_needing_classification, classifications):
-                if dimension in ALL_DIMENSIONS:
-                    issue.dimension = dimension
-        except Exception as e:
-            print(f"AI dimension classification failed, using rule-based: {e}")
-
-        return normalized_issues
-
-    async def _batch_classify_dimensions(
-        self,
-        issues: List[NormalizedIssue],
-    ) -> List[str]:
-        """Batch classify dimensions using AI.
-
-        Args:
-            issues: Issues to classify
-
-        Returns:
-            List of dimension strings
-        """
-        if not issues:
-            return []
-
-        # Process in smaller batches to avoid timeouts (max 10 at a time)
         BATCH_SIZE = 10
-        all_dimensions = [issue.dimension for issue in issues]  # Default to existing
 
-        for batch_start in range(0, len(issues), BATCH_SIZE):
-            batch_issues = issues[batch_start:batch_start + BATCH_SIZE]
-            batch_dimensions = await self._classify_single_batch(batch_issues, batch_start)
+        for batch_start in range(0, len(unique_problems), BATCH_SIZE):
+            batch = unique_problems[batch_start:batch_start + BATCH_SIZE]
+            updates = await self._classify_unique_problem_batch(batch)
+            for problem, update in zip(batch, updates):
+                if not update:
+                    continue
+                dimension = update.get("dimension")
+                severity = update.get("severity")
+                if isinstance(dimension, str) and dimension.lower() in ALL_DIMENSIONS:
+                    problem.dimension = dimension.lower()
+                if isinstance(severity, str):
+                    parsed_severity = self._parse_severity(severity)
+                    if parsed_severity:
+                        problem.final_severity = parsed_severity
 
-            # Update dimensions for this batch
-            for i, dim in enumerate(batch_dimensions):
-                if dim in ALL_DIMENSIONS:
-                    all_dimensions[batch_start + i] = dim
+        return unique_problems
 
-        return all_dimensions
-
-    async def _classify_single_batch(
+    async def _classify_unique_problem_batch(
         self,
-        issues: List[NormalizedIssue],
-        start_index: int = 0,
-    ) -> List[str]:
-        """Classify a single batch of issues."""
-        # Prepare batch prompt with minimal context
-        issues_data = []
-        for i, issue in enumerate(issues):
-            issues_data.append({
-                "index": i,
-                "title": issue.normalized_title[:80],
-                "rule_id": issue.rule_id or "",
+        problems: List[UniqueProblem],
+    ) -> List[Dict[str, Optional[str]]]:
+        """Classify a batch of unique problems with AI."""
+        problem_data = []
+        for idx, problem in enumerate(problems):
+            example_files = problem.affected_files[:3]
+            problem_data.append({
+                "index": idx,
+                "title": problem.title[:120],
+                "description": problem.description[:200],
+                "rule_ids": problem.rule_ids[:3],
+                "scanners": problem.scanners[:3],
+                "occurrences": problem.occurrence_count,
+                "example_files": example_files,
             })
 
-        prompt = f"""Classify each issue into ONE dimension: security, performance, reliability, or monitoring.
+        prompt = f"""For each problem, classify:
+- dimension: security, performance, reliability, or monitoring
+- severity: critical, high, medium, low, or info
 
-Issues:
-{json.dumps(issues_data)}
+Problems:
+{json.dumps(problem_data)}
 
-Respond with JSON array: [{{"index": 0, "dimension": "security"}}]"""
+Respond with JSON array:
+[{{"index": 0, "dimension": "performance", "severity": "high"}}]"""
 
         try:
             response = await asyncio.wait_for(
                 self.ai_provider.complete(
                     messages=[
-                        {"role": "system", "content": "Classify infrastructure issues. Respond with valid JSON array only."},
+                        {"role": "system", "content": "Classify infrastructure problems. Respond with valid JSON array only."},
                         {"role": "user", "content": prompt},
                     ],
-                    max_tokens=500,
+                    max_tokens=800,
                     temperature=0.1,
                     json_mode=True,
                 ),
-                timeout=30.0  # 30 second timeout
+                timeout=30.0,
             )
 
-            # Track token usage safely
             tracker = GlobalTokenTracker.get_tracker()
             if tracker and response.usage:
                 prompt_tokens = response.usage.get('prompt_tokens', 0) if isinstance(response.usage, dict) else 0
@@ -547,175 +514,39 @@ Respond with JSON array: [{{"index": 0, "dimension": "security"}}]"""
                 content = re.sub(r'\n?```$', '', content)
 
             results = json.loads(content)
-
-            # Handle case where results is not a list
             if not isinstance(results, list):
-                return [issue.dimension for issue in issues]
+                return [{} for _ in problems]
 
-            # Build result list maintaining order
-            dimensions = [issue.dimension for issue in issues]
+            updates: List[Dict[str, Optional[str]]] = [{} for _ in problems]
             for item in results:
-                # Skip non-dict items
                 if not isinstance(item, dict):
                     continue
                 idx = item.get("index")
-                dim = item.get("dimension", "").lower() if isinstance(item.get("dimension"), str) else ""
-                if idx is not None and isinstance(idx, int) and 0 <= idx < len(issues) and dim in ALL_DIMENSIONS:
-                    dimensions[idx] = dim
+                if isinstance(idx, int) and 0 <= idx < len(problems):
+                    updates[idx] = {
+                        "dimension": item.get("dimension"),
+                        "severity": item.get("severity"),
+                    }
 
-            return dimensions
-
+            return updates
         except asyncio.TimeoutError:
-            print(f"Dimension classification timeout, using rule-based")
-            return [issue.dimension for issue in issues]
-        except Exception as e:
-            print(f"Batch dimension classification error: {e}")
-            return [issue.dimension for issue in issues]
+            print("Unique problem classification timeout, using defaults")
+            return [{} for _ in problems]
+        except Exception as exc:
+            print(f"Unique problem classification error: {exc}")
+            return [{} for _ in problems]
 
-    async def _generate_problem_keys(
-        self,
-        normalized_issues: List[NormalizedIssue],
-    ) -> List[NormalizedIssue]:
-        """Generate canonical problem keys for issues.
-
-        Args:
-            normalized_issues: List of normalized issues
-
-        Returns:
-            Issues with refined problem keys
-        """
-        if not self.use_ai_classification or not self.is_ai_available():
-            return normalized_issues
-
-        # Find issues with auto-generated keys that might need refinement
-        issues_needing_keys = []
-        for issue in normalized_issues:
-            # If key came from known mapping, it's reliable
-            if issue.rule_id in self.KNOWN_PROBLEM_KEYS:
-                continue
-            issues_needing_keys.append(issue)
-
-        if not issues_needing_keys:
-            return normalized_issues
-
-        # Batch generate keys with AI
-        try:
-            keys = await self._batch_generate_problem_keys(issues_needing_keys)
-            for issue, key in zip(issues_needing_keys, keys):
-                if key:
-                    issue.problem_key = key
-        except Exception as e:
-            print(f"AI problem key generation failed, using auto-generated: {e}")
-
-        return normalized_issues
-
-    async def _batch_generate_problem_keys(
-        self,
-        issues: List[NormalizedIssue],
-    ) -> List[str]:
-        """Batch generate problem keys using AI.
-
-        Args:
-            issues: Issues to generate keys for
-
-        Returns:
-            List of problem key strings
-        """
-        if not issues:
-            return []
-
-        # Process in smaller batches to avoid timeouts (max 10 at a time)
-        BATCH_SIZE = 10
-        all_keys = [issue.problem_key for issue in issues]  # Default to existing
-
-        for batch_start in range(0, len(issues), BATCH_SIZE):
-            batch_issues = issues[batch_start:batch_start + BATCH_SIZE]
-            batch_keys = await self._generate_keys_single_batch(batch_issues)
-
-            # Update keys for this batch
-            for i, key in enumerate(batch_keys):
-                if key:
-                    all_keys[batch_start + i] = key
-
-        return all_keys
-
-    async def _generate_keys_single_batch(
-        self,
-        issues: List[NormalizedIssue],
-    ) -> List[str]:
-        """Generate problem keys for a single batch of issues."""
-        # Prepare batch prompt with minimal context
-        issues_data = []
-        for i, issue in enumerate(issues):
-            issues_data.append({
-                "index": i,
-                "title": issue.normalized_title[:80],
-            })
-
-        prompt = f"""Generate a canonical problem key for each issue (snake_case, 2-4 words).
-
-Issues:
-{json.dumps(issues_data)}
-
-Example: cpu_limits_missing, liveness_probe_missing
-
-Respond with JSON array: [{{"index": 0, "problem_key": "example_key"}}]"""
-
-        try:
-            response = await asyncio.wait_for(
-                self.ai_provider.complete(
-                    messages=[
-                        {"role": "system", "content": "Generate canonical problem identifiers. Respond with valid JSON array only."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=500,
-                    temperature=0.1,
-                    json_mode=True,
-                ),
-                timeout=30.0  # 30 second timeout
-            )
-
-            # Track token usage safely
-            tracker = GlobalTokenTracker.get_tracker()
-            if tracker and response.usage:
-                prompt_tokens = response.usage.get('prompt_tokens', 0) if isinstance(response.usage, dict) else 0
-                completion_tokens = response.usage.get('completion_tokens', 0) if isinstance(response.usage, dict) else 0
-                tracker.add_usage(prompt_tokens, completion_tokens)
-
-            content = response.content.strip()
-            if content.startswith("```"):
-                content = re.sub(r'^```\w*\n?', '', content)
-                content = re.sub(r'\n?```$', '', content)
-
-            results = json.loads(content)
-
-            # Handle case where results is not a list
-            if not isinstance(results, list):
-                return [issue.problem_key for issue in issues]
-
-            # Build result list maintaining order
-            keys = [issue.problem_key for issue in issues]
-            for item in results:
-                # Skip non-dict items
-                if not isinstance(item, dict):
-                    continue
-                idx = item.get("index")
-                key = item.get("problem_key", "")
-                if idx is not None and isinstance(idx, int) and 0 <= idx < len(issues) and key and isinstance(key, str):
-                    # Normalize the key
-                    key = re.sub(r'[^a-z0-9_]', '_', key.lower())
-                    key = re.sub(r'_+', '_', key).strip('_')
-                    if key:
-                        keys[idx] = key
-
-            return keys
-
-        except asyncio.TimeoutError:
-            print(f"Problem key generation timeout, using auto-generated keys")
-            return [issue.problem_key for issue in issues]
-        except Exception as e:
-            print(f"Batch problem key generation error: {e}")
-            return [issue.problem_key for issue in issues]
+    def _parse_severity(self, severity: str) -> Optional[Severity]:
+        """Parse severity string into Severity enum."""
+        normalized = severity.strip().lower()
+        mapping = {
+            "critical": Severity.CRITICAL,
+            "high": Severity.HIGH,
+            "medium": Severity.MEDIUM,
+            "low": Severity.LOW,
+            "info": Severity.INFO,
+        }
+        return mapping.get(normalized)
 
     def _group_by_problem_key(
         self,

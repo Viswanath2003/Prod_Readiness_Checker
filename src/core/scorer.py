@@ -1,5 +1,6 @@
 """Scorer Module - Calculates production readiness scores."""
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -271,13 +272,13 @@ class Scorer:
         low_count = len([i for i in issues if i.severity == Severity.LOW])
         info_count = len([i for i in issues if i.severity == Severity.INFO])
 
-        # Calculate penalty
-        penalty = (
-            critical_count * self.SEVERITY_PENALTIES[Severity.CRITICAL]
-            + high_count * self.SEVERITY_PENALTIES[Severity.HIGH]
-            + medium_count * self.SEVERITY_PENALTIES[Severity.MEDIUM]
-            + low_count * self.SEVERITY_PENALTIES[Severity.LOW]
-            + info_count * self.SEVERITY_PENALTIES[Severity.INFO]
+        # Calculate penalty with diminishing returns
+        penalty = self._calculate_diminishing_penalty(
+            critical_count=critical_count,
+            high_count=high_count,
+            medium_count=medium_count,
+            low_count=low_count,
+            info_count=info_count,
         )
 
         # Score is 100 minus penalties, minimum 0
@@ -296,6 +297,7 @@ class Scorer:
             details={
                 "penalty_applied": penalty,
                 "issues_analyzed": len(issues),
+                "scoring_method": "diminishing_returns",
             },
         )
 
@@ -490,13 +492,13 @@ class Scorer:
         low_count = len([p for p in problems if p.final_severity == Severity.LOW])
         info_count = len([p for p in problems if p.final_severity == Severity.INFO])
 
-        # Calculate penalty based on unique problems (not instances)
-        penalty = (
-            critical_count * self.SEVERITY_PENALTIES[Severity.CRITICAL]
-            + high_count * self.SEVERITY_PENALTIES[Severity.HIGH]
-            + medium_count * self.SEVERITY_PENALTIES[Severity.MEDIUM]
-            + low_count * self.SEVERITY_PENALTIES[Severity.LOW]
-            + info_count * self.SEVERITY_PENALTIES[Severity.INFO]
+        # Calculate penalty with diminishing returns
+        penalty = self._calculate_diminishing_penalty(
+            critical_count=critical_count,
+            high_count=high_count,
+            medium_count=medium_count,
+            low_count=low_count,
+            info_count=info_count,
         )
 
         # Score is 100 minus penalties, minimum 0
@@ -519,6 +521,28 @@ class Scorer:
                 "penalty_applied": penalty,
                 "unique_problems_analyzed": len(problems),
                 "total_occurrences": total_occurrences,
-                "scoring_method": "unique_problems",
+                "scoring_method": "unique_problems_diminishing_returns",
             },
         )
+
+    def _calculate_diminishing_penalty(
+        self,
+        critical_count: int,
+        high_count: int,
+        medium_count: int,
+        low_count: int,
+        info_count: int,
+    ) -> float:
+        """Calculate penalty with diminishing returns."""
+        penalty = 0.0
+        if critical_count > 0:
+            penalty += self.SEVERITY_PENALTIES[Severity.CRITICAL] * math.log2(1 + critical_count)
+        if high_count > 0:
+            penalty += self.SEVERITY_PENALTIES[Severity.HIGH] * math.log2(1 + high_count)
+        if medium_count > 0:
+            penalty += self.SEVERITY_PENALTIES[Severity.MEDIUM] * math.log2(1 + medium_count)
+        if low_count > 0:
+            penalty += self.SEVERITY_PENALTIES[Severity.LOW] * math.log2(1 + low_count)
+        if info_count > 0:
+            penalty += self.SEVERITY_PENALTIES[Severity.INFO] * math.log2(1 + info_count)
+        return penalty
