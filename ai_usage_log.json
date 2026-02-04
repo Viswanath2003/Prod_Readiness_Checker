@@ -1,0 +1,18 @@
+[
+  {
+    "timestamp": "2026-02-03T18:59:27.225521",
+    "prompt_tokens": 36702,
+    "completion_tokens": 3444,
+    "total_tokens": 40146,
+    "request_count": 96,
+    "total_cost": 0.126195
+  },
+  {
+    "timestamp": "2026-02-03T19:44:54.384364",
+    "prompt_tokens": 38240,
+    "completion_tokens": 4657,
+    "total_tokens": 42897,
+    "request_count": 100,
+    "total_cost": 0.14217000000000002
+  }
+]
